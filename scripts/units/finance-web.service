@@ -1,0 +1,16 @@
+# Template — installed by scripts/install-services.sh (placeholders substituted).
+[Unit]
+Description=Finance Dashboard — Next.js web app (port 3141)
+After=finance-supabase.service
+Wants=finance-supabase.service
+
+[Service]
+WorkingDirectory=@ROOT@
+Environment=NODE_ENV=production
+Environment=PORT=3141
+ExecStart=@NODE@ scripts/launch-web.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

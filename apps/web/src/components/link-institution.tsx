@@ -1,0 +1,214 @@
+"use client";
+
+import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
+import { usePlaidLink } from "react-plaid-link";
+import { Landmark, Loader2, RefreshCw } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+
+interface LinkedAccount {
+  id: string;
+  name: string;
+  type: string;
+  subtype: string | null;
+  mask: string | null;
+  is_business: boolean;
+  business_entity: string | null;
+}
+
+/**
+ * "Link institution" button -> Plaid Link -> exchange -> business-flag step.
+ * Pass institutionId to run in relink/update mode for a broken connection.
+ */
+export function LinkInstitution({
+  institutionId,
+  compact = false,
+}: {
+  institutionId?: string;
+  compact?: boolean;
+}) {
+  const router = useRouter();
+  const [linkToken, setLinkToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [flagStep, setFlagStep] = useState<LinkedAccount[] | null>(null);
+
+  const start = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    const res = await fetch("/api/plaid/link-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(institutionId ? { institution_id: institutionId } : {}),
+    });
+    const data = await res.json();
+    setBusy(false);
+    if (!res.ok) {
+      setError(data.error ?? "Could not create link token");
+      return;
+    }
+    setLinkToken(data.link_token);
+  }, [institutionId]);
+
+  const onSuccess = useCallback(
+    async (
+      publicToken: string | null,
+      metadata: { institution?: { name: string; institution_id: string } | null }
+    ) => {
+      setLinkToken(null);
+      if (!publicToken) return;
+      if (institutionId) {
+        // relink/update mode: token unchanged, just refresh
+        router.refresh();
+        return;
+      }
+      setBusy(true);
+      const res = await fetch("/api/plaid/exchange", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public_token: publicToken, institution: metadata.institution }),
+      });
+      const data = await res.json();
+      setBusy(false);
+      if (!res.ok) {
+        setError(data.error ?? "Exchange failed");
+        return;
+      }
+      setFlagStep(data.accounts);
+    },
+    [institutionId, router]
+  );
+
+  const { open, ready } = usePlaidLink({
+    token: linkToken,
+    onSuccess,
+    onExit: () => setLinkToken(null),
+  });
+
+  if (linkToken && ready) open();
+
+  if (flagStep) {
+    return (
+      <BusinessFlagDialog
+        accounts={flagStep}
+        onDone={() => {
+          setFlagStep(null);
+          router.refresh();
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className={compact ? "inline-flex" : "flex flex-col gap-1"}>
+      <Button
+        variant={institutionId ? "outline" : "default"}
+        size="sm"
+        onClick={start}
+        disabled={busy || (linkToken != null && !ready)}
+      >
+        {busy || (linkToken != null && !ready) ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : institutionId ? (
+          <RefreshCw className="h-4 w-4" />
+        ) : (
+          <Landmark className="h-4 w-4" />
+        )}
+        {institutionId ? "Relink" : "Link institution"}
+      </Button>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+    </div>
+  );
+}
+
+function BusinessFlagDialog({
+  accounts,
+  onDone,
+}: {
+  accounts: LinkedAccount[];
+  onDone: () => void;
+}) {
+  const [rows, setRows] = useState(accounts);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    for (const row of rows) {
+      const original = accounts.find((a) => a.id === row.id);
+      if (
+        original &&
+        (original.is_business !== row.is_business ||
+          original.business_entity !== row.business_entity)
+      ) {
+        await fetch(`/api/accounts/${row.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            is_business: row.is_business,
+            business_entity: row.business_entity,
+          }),
+        });
+      }
+    }
+    setSaving(false);
+    onDone();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="w-full max-w-lg rounded-lg border bg-card p-5">
+        <h2 className="text-sm font-semibold">Institution linked</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Flag any business accounts — every transaction they sync will
+          auto-tag as business and request a receipt. Initial sync is queued.
+        </p>
+        <div className="mt-4 space-y-2">
+          {rows.map((a, i) => (
+            <div key={a.id} className="flex items-center gap-3 rounded-md border p-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm">{a.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  {a.type}
+                  {a.subtype ? ` · ${a.subtype}` : ""}
+                  {a.mask ? ` · …${a.mask}` : ""}
+                </p>
+              </div>
+              <label className="flex items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  checked={a.is_business}
+                  onChange={(e) => {
+                    const next = [...rows];
+                    next[i] = { ...a, is_business: e.target.checked };
+                    setRows(next);
+                  }}
+                />
+                Business
+              </label>
+              {a.is_business && (
+                <Input
+                  placeholder="Entity"
+                  value={a.business_entity ?? ""}
+                  onChange={(e) => {
+                    const next = [...rows];
+                    next[i] = { ...a, business_entity: e.target.value };
+                    setRows(next);
+                  }}
+                  className="h-7 w-36 text-xs"
+                />
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 flex items-center justify-between">
+          <Badge variant="secondary">initial sync queued</Badge>
+          <Button size="sm" onClick={save} disabled={saving}>
+            {saving ? "Saving…" : "Done"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

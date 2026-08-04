@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Command-center theme: dense, dark, data-forward (spec §5). Dark is the only
+   theme by design — this is a cockpit, not a marketing site. */
+@layer base {
+  :root {
+    --background: 222 22% 7%;
+    --foreground: 214 20% 88%;
+    --card: 222 20% 10%;
+    --card-foreground: 214 20% 88%;
+    --primary: 152 65% 45%;
+    --primary-foreground: 222 22% 7%;
+    --secondary: 222 16% 16%;
+    --secondary-foreground: 214 20% 88%;
+    --muted: 222 16% 14%;
+    --muted-foreground: 215 12% 55%;
+    --accent: 222 16% 18%;
+    --accent-foreground: 214 20% 92%;
+    --destructive: 0 68% 52%;
+    --destructive-foreground: 0 0% 98%;
+    --success: 152 65% 45%;
+    --warning: 38 92% 50%;
+    --border: 222 14% 18%;
+    --input: 222 14% 20%;
+    --ring: 152 65% 45%;
+    --radius: 0.375rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "tnum" 1; /* tabular numbers everywhere — it's a finance app */
+  }
+}

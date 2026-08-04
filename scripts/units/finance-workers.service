@@ -1,0 +1,15 @@
+# Template — installed by scripts/install-services.sh (placeholders substituted).
+[Unit]
+Description=Finance Dashboard — background workers (sync/agent/executor)
+After=finance-supabase.service
+Wants=finance-supabase.service
+
+[Service]
+WorkingDirectory=@ROOT@
+Environment=NODE_ENV=production
+ExecStart=@NODE@ scripts/launch-workers.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+# Template — installed by scripts/install-desktop.sh (placeholders substituted).
+[Unit]
+Description=Life Command — system tray controller
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+WorkingDirectory=@ROOT@
+ExecStart=/usr/bin/python3 scripts/tray.py
+# always: survives crashes AND clean exits — the only sanctioned stop is
+# `systemctl --user stop finance-tray` (what the Quit menu item runs)
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

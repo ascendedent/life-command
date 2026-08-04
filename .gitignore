@@ -1,0 +1,49 @@
+# dependencies
+node_modules/
+
+# next.js
+apps/web/.next/
+apps/web/out/
+
+# env — never commit secrets (spec §7.1)
+.env
+.env.*
+!.env.example
+apps/**/.env
+apps/**/.env.*
+!apps/**/.env.example
+
+# supabase local state
+supabase/.temp/
+supabase/.branches/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# logs & runtime
+logs/
+*.log
+.pm2/
+
+# misc
+.DS_Store
+
+# generated tray pixmaps
+assets/tray/gen/
+
+# personal compliance evidence — not for the shareable repo
+docs/evidence/
+
+# The filed compliance PDFs carry the owner's real name and contact details.
+# The .md sources ship as templates with placeholders; regenerate your own PDFs.
+docs/*.pdf
+
+# Self Improvement drop folder is a runtime inbox — its contents are personal
+# data, not source. The directory itself ships (via .gitkeep) so the watcher
+# has somewhere to look on a fresh clone.
+si-inbox/*
+!si-inbox/.gitkeep
+
+# Local scratch
+*.bak

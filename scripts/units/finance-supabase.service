@@ -1,0 +1,18 @@
+# Template — installed by scripts/install-services.sh (placeholders substituted).
+[Unit]
+Description=Finance Dashboard — Supabase local stack (Docker)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=600
+WorkingDirectory=@ROOT@
+Environment=PATH=@NODE_DIR@:/usr/local/bin:/usr/bin:/bin
+# Docker is a system service the user manager can't order against — wait for it.
+ExecStartPre=/usr/bin/bash -c 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; echo "docker never came up"; exit 1'
+ExecStart=/usr/bin/bash -c 'cd "@ROOT@" && npx supabase start'
+ExecStartPost=/usr/bin/bash -c 'cd "@ROOT@" && node scripts/sync-env.mjs'
+ExecStop=/usr/bin/bash -c 'cd "@ROOT@" && npx supabase stop'
+
+[Install]
+WantedBy=default.target

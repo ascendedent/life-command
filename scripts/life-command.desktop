@@ -1,0 +1,36 @@
+# Template — installed by scripts/install-desktop.sh (placeholders substituted).
+[Desktop Entry]
+Type=Application
+Name=Life Command
+Comment=Personal AI finance + life platform — dashboard and stack control
+Exec=/usr/bin/bash "@ROOT@/scripts/stack-ctl.sh" open
+Icon=@ROOT@/assets/icon.svg
+Terminal=false
+Categories=Office;Finance;
+StartupWMClass=life-command
+Actions=start;stop;restart;status;studio;
+
+[Desktop Action start]
+Name=Start stack
+Exec=/usr/bin/bash "@ROOT@/scripts/stack-ctl.sh" start
+Icon=@ROOT@/assets/icon.svg
+
+[Desktop Action stop]
+Name=Stop stack (free RAM)
+Exec=/usr/bin/bash "@ROOT@/scripts/stack-ctl.sh" stop
+Icon=@ROOT@/assets/icon.svg
+
+[Desktop Action restart]
+Name=Restart web + workers
+Exec=/usr/bin/bash "@ROOT@/scripts/stack-ctl.sh" restart
+Icon=@ROOT@/assets/icon.svg
+
+[Desktop Action status]
+Name=Status
+Exec=/usr/bin/bash "@ROOT@/scripts/stack-ctl.sh" status
+Icon=@ROOT@/assets/icon.svg
+
+[Desktop Action studio]
+Name=Open Supabase Studio
+Exec=/usr/bin/bash "@ROOT@/scripts/stack-ctl.sh" studio
+Icon=@ROOT@/assets/icon.svg
