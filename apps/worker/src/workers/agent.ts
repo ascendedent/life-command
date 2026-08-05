@@ -68,7 +68,7 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
     db.from("accounts").select("name, type, subtype, mask, current_balance, is_business, business_entity"),
     db
       .from("transactions")
-      .select("date, amount, merchant_clean, merchant, is_business, categories (name), accounts (mask, type)")
+      .select("date, amount, merchant_clean, merchant, is_business, categories (name, category_groups (type)), accounts (mask, type)")
       .gte("date", ninetyDaysAgo)
       // hidden=false alone counts each dollar once: a split hides the parent
       // and creates children. Excluding children too would understate spending.
@@ -88,17 +88,32 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
     db.from("net_worth_snapshots").select("date, total").order("date", { ascending: false }).limit(30),
   ]);
 
-  // 90-day cash flow aggregates by month and category
-  const monthly = new Map<string, { inflow: number; outflow: number }>();
+  // 90-day cash flow aggregates by month and category.
+  //
+  // Transfers are excluded, because a transfer is the same dollar counted
+  // twice: moving $6,500 from savings to checking is an outflow on one account
+  // and an inflow on the other, and a card payment is an outflow from checking
+  // and an inflow on the card. Counting them made June read as $15,900 in
+  // against $18,300 out — a $2,180 shortfall in a month that was actually
+  // $2,310 positive — and the agent duly reported three straight negative
+  // months. Reports and the recap already excluded them; only this snapshot
+  // did not.
+  const monthly = new Map<string, { inflow: number; outflow: number; transfers: number }>();
   const byCategory = new Map<string, number>();
   for (const t of txns ?? []) {
     const month = String(t.date).slice(0, 7);
-    if (!monthly.has(month)) monthly.set(month, { inflow: 0, outflow: 0 });
+    if (!monthly.has(month)) monthly.set(month, { inflow: 0, outflow: 0, transfers: 0 });
     const amt = Number(t.amount);
+    const cat = t.categories as unknown as
+      | { name: string; category_groups?: { type: string } | null }
+      | null;
+    if (cat?.category_groups?.type === "transfer") {
+      monthly.get(month)!.transfers += Math.abs(amt);
+      continue;
+    }
     if (amt > 0) {
       monthly.get(month)!.outflow += amt;
-      const cat = (t.categories as unknown as { name: string } | null)?.name ?? "Uncategorized";
-      byCategory.set(cat, (byCategory.get(cat) ?? 0) + amt);
+      byCategory.set(cat?.name ?? "Uncategorized", (byCategory.get(cat?.name ?? "Uncategorized") ?? 0) + amt);
     } else {
       monthly.get(month)!.inflow += -amt;
     }
@@ -145,7 +160,15 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
     net_worth_recent: (netWorth ?? []).map((n) => ({ date: n.date, total: n.total })),
     cash_flow_by_month: [...monthly.entries()]
       .sort()
-      .map(([month, v]) => ({ month, inflow: round(v.inflow), outflow: round(v.outflow) })),
+      .map(([month, v]) => ({
+        month,
+        inflow: round(v.inflow),
+        outflow: round(v.outflow),
+        net: round(v.inflow - v.outflow),
+        // Reported separately so the model can talk about money moving without
+        // mistaking it for income or spending.
+        transfers_excluded: round(v.transfers),
+      })),
     spend_by_category_90d: [...byCategory.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, 25)
