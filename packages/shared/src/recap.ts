@@ -313,6 +313,10 @@ export interface GoalCostInput {
     account_last4: string | null;
     balance: number | null;
     apr: number | null;
+    /** Interest actually charged on this card during the period. */
+    observed_interest: number;
+    /** The charges that make up that figure, so it can be checked. */
+    interest_txn_ids: string[];
   }[];
   days: number;
 }
@@ -332,22 +336,41 @@ export function computeGoalCosts(input: GoalCostInput): GoalCostFact {
     .map((c) => c.transaction_id)
     .filter((id): id is string => Boolean(id));
 
+  // Interest that was actually charged, never interest a formula says should
+  // have been.
+  //
+  // The first version multiplied statement balance by APR by days, which
+  // reported $27.40 of interest on a card whose statement is paid in full every
+  // month and which has been charged interest exactly twice in its life, both
+  // in early 2025. On a second card with no interest charge ever, it invented
+  // $5.05. Grounding did not catch it because Stage 1 had genuinely produced
+  // the number — it was sourced, checked, and wholly fictional.
+  //
+  // A card carrying a balance inside its grace period costs nothing, and only
+  // the statement knows that. So the cost is the charge on the card: no charge,
+  // no cost. If the statement has not posted yet the period reports zero, which
+  // is true of that period and becomes true of the next one when it posts.
   const costs: GoalCostFact["costs"] = [];
   if (contributed > 0) {
     for (const d of input.costDrivers) {
-      const balance = Number(d.balance ?? 0);
+      const observed = round2(Number(d.observed_interest ?? 0));
+      if (observed <= 0) continue;
       const apr = Number(d.apr ?? 0);
-      if (balance <= 0 || apr <= 0) continue;
-      const computation = interestAccrued(balance, apr, input.days);
       costs.push({
-        cost_type: "interest_accrued",
-        amount: computation.interest,
+        cost_type: "interest_charged",
+        amount: observed,
         liability_id: d.liability_id,
         liability_last4: d.account_last4,
-        computation,
-        narrative: `Carried ${computation.balance} on the card ending ${
+        computation: {
+          source: "charged_on_statement",
+          interest: observed,
+          charge_count: d.interest_txn_ids.length,
+          charge_transaction_ids: d.interest_txn_ids,
+          ...(apr > 0 ? { apr_percent: apr } : {}),
+        },
+        narrative: `Paid ${observed} in interest on the card ending ${
           d.account_last4 ?? "—"
-        } for ${input.days} days at ${apr}% APR while contributing ${contributed} to this goal.`,
+        } while contributing ${contributed} to this goal.`,
         contributing_txn_ids: txnIds,
       });
     }

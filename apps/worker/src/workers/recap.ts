@@ -191,6 +191,30 @@ export async function buildFacts(
     db.from("goal_links").select("*"),
   ]);
 
+  // Interest actually charged in the window, per account. This is the only
+  // honest source: a statement paid in full inside its grace period costs
+  // nothing, and no formula over balance and APR can know that.
+  const { data: interestRows } = await db
+    .from("transactions")
+    .select("id, account_id, amount, merchant, description, categories (name)")
+    .gte("date", window.start)
+    .lte("date", window.end)
+    .gt("amount", 0)
+    .eq("hidden", false)
+    .limit(5000);
+  const interestByAccount = new Map<string, { total: number; ids: string[] }>();
+  for (const r of interestRows ?? []) {
+    const name = (r.categories as unknown as { name: string } | null)?.name ?? "";
+    const text = `${r.merchant ?? ""} ${r.description ?? ""}`;
+    const isInterest =
+      name === "Interest Paid" || /interest charge|interest assessed|finance charge/i.test(text);
+    if (!isInterest) continue;
+    const entry = interestByAccount.get(r.account_id as string) ?? { total: 0, ids: [] };
+    entry.total += Number(r.amount);
+    entry.ids.push(r.id as string);
+    interestByAccount.set(r.account_id as string, entry);
+  }
+
   const goals: Stage1Facts["goals"] = [];
   for (const g of (goalRows ?? []) as GoalRow[]) {
     const { data: contribs } = await db
@@ -223,11 +247,17 @@ export async function buildFacts(
       .filter((l: any) => l.goal_id === g.id && l.role === "cost_driver" && l.entity_type === "liability")
       .map((l: any) => {
         const liab = (liabilityRows ?? []).find((x: any) => x.id === l.entity_id);
+        const charges = interestByAccount.get(liab?.account_id as string) ?? {
+          total: 0,
+          ids: [] as string[],
+        };
         return {
           liability_id: l.entity_id as string,
           account_last4: (liab?.accounts as { mask: string | null } | null)?.mask ?? null,
           balance: liab?.balance != null ? Number(liab.balance) : null,
           apr: liab?.apr != null ? Number(liab.apr) : null,
+          observed_interest: charges.total,
+          interest_txn_ids: charges.ids,
         };
       });
 
