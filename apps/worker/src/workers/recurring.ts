@@ -36,6 +36,35 @@ async function transferCategoryIds(db: SupabaseClient): Promise<Set<string>> {
   return new Set((data ?? []).map((c: { id: string }) => c.id));
 }
 
+/**
+ * A recurring bill you cannot cancel is not a subscription.
+ *
+ * `is_subscription` feeds the monthly recap's subscription review, which issues
+ * keep / replace / cut verdicts. Rent qualified on the detector's original test
+ * — perfectly regular cadence, identical amount every month — which is exactly
+ * backwards: the more unavoidable the obligation, the better it scored. The
+ * review is for things there is a decision to make about.
+ */
+const NEVER_A_SUBSCRIPTION = new Set([
+  "Rent",
+  "Mortgage",
+  "Property Tax",
+  "Loan Payment",
+  "Auto Payment",
+  "Auto Insurance",
+  "Insurance",
+  "Taxes",
+  "Childcare",
+]);
+
+async function nonSubscriptionCategoryIds(db: SupabaseClient): Promise<Set<string>> {
+  const { data } = await db
+    .from("categories")
+    .select("id, name")
+    .in("name", [...NEVER_A_SUBSCRIPTION]);
+  return new Set((data ?? []).map((c: { id: string }) => c.id));
+}
+
 function median(nums: number[]): number {
   const s = [...nums].sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
@@ -54,6 +83,7 @@ function cadenceFromGap(days: number): { cadence: string; ok: boolean } {
 export async function detectRecurring(db: SupabaseClient): Promise<void> {
   const cutoff = new Date(Date.now() - 400 * 86400_000).toISOString().slice(0, 10);
   const excluded = await transferCategoryIds(db);
+  const notSubscribable = await nonSubscriptionCategoryIds(db);
   const { data: txns } = await db
     .from("transactions")
     .select("id, merchant, merchant_clean, amount, date, account_id, category_id, parent_transaction_id")
@@ -129,7 +159,8 @@ export async function detectRecurring(db: SupabaseClient): Promise<void> {
 
     const isSubscription =
       (cadence === "monthly" || cadence === "weekly" || cadence === "annual") &&
-      amounts.every((a) => Math.abs(a - medAmount) <= Math.max(1, medAmount * 0.05));
+      amounts.every((a) => Math.abs(a - medAmount) <= Math.max(1, medAmount * 0.05)) &&
+      !(last.category_id && notSubscribable.has(last.category_id));
 
     const { data: existing } = await db
       .from("recurring_items")

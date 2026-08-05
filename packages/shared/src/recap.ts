@@ -400,6 +400,88 @@ export function collectNumbers(value: unknown, into = new Set<number>()): Set<nu
   return into;
 }
 
+export interface AccountRef {
+  name: string;
+  last4: string | null;
+}
+
+export interface AccountRefResult {
+  ok: boolean;
+  violations: { name: string; cited: string; valid: string[]; context: string }[];
+  checked: number;
+}
+
+/**
+ * Reject a mask attached to the wrong account name.
+ *
+ * Grounding checks that every figure is real; it has nothing to say about which
+ * account a real figure belongs to. A live run wrote "the Discover it Card
+ * (last4 1234)" — 1234 is a different card entirely, and the APR and balance
+ * quoted alongside it were correct, so every number passed. Advisory text can
+ * survive that; a recommendation carrying an executable payload cannot.
+ *
+ * Each mask is paired with the nearest account name mentioned before it, which
+ * is how these are actually written. Sentences naming two accounts
+ * ("move from SAVINGS (5678) to Discover (9012)") therefore check each
+ * pair independently rather than cross-multiplying into false positives.
+ *
+ * A name may map to several masks — three cards can all read "Quicksilver" —
+ * so any mask belonging to that name is accepted.
+ */
+export function verifyAccountReferences(
+  texts: string[],
+  accounts: AccountRef[]
+): AccountRefResult {
+  const masksByName = new Map<string, Set<string>>();
+  const allMasks = new Set<string>();
+  for (const a of accounts) {
+    if (!a.last4) continue;
+    const key = a.name.trim().toLowerCase();
+    if (!masksByName.has(key)) masksByName.set(key, new Set());
+    masksByName.get(key)!.add(a.last4);
+    allMasks.add(a.last4);
+  }
+  // Longest names first: "Discover it Card" must win over "Discover".
+  const names = [...masksByName.keys()].sort((a, b) => b.length - a.length);
+
+  const violations: AccountRefResult["violations"] = [];
+  let checked = 0;
+
+  for (const text of texts) {
+    if (!text) continue;
+    const hay = text.toLowerCase();
+    for (const match of text.matchAll(/\b\d{4}\b/g)) {
+      const cited = match[0];
+      // Only 4-digit tokens that are actually one of the owner's masks; any
+      // other number is grounding's problem, not this check's.
+      if (!allMasks.has(cited)) continue;
+      const at = match.index ?? 0;
+      const window = hay.slice(Math.max(0, at - 60), at);
+
+      let nearest: { name: string; at: number } | null = null;
+      for (const name of names) {
+        const found = window.lastIndexOf(name);
+        if (found === -1) continue;
+        if (!nearest || found > nearest.at) nearest = { name, at: found };
+      }
+      if (!nearest) continue;
+
+      checked++;
+      const valid = masksByName.get(nearest.name)!;
+      if (!valid.has(cited)) {
+        violations.push({
+          name: nearest.name,
+          cited,
+          valid: [...valid],
+          context: text.slice(Math.max(0, at - 60), at + 20).replace(/\s+/g, " "),
+        });
+      }
+    }
+  }
+
+  return { ok: violations.length === 0, violations, checked };
+}
+
 export interface GroundingResult {
   ok: boolean;
   offenders: { value: number; context: string }[];

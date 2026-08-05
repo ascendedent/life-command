@@ -352,7 +352,7 @@ async function writeGoalCosts(db: SupabaseClient, facts: Stage1Facts, runId: str
       .eq("period_end", facts.period_end);
 
     for (const cost of goal.costs) {
-      await db.from("goal_costs").insert({
+      const { error } = await db.from("goal_costs").insert({
         goal_id: goal.goal_id,
         period_start: facts.period_start,
         period_end: facts.period_end,
@@ -366,6 +366,12 @@ async function writeGoalCosts(db: SupabaseClient, facts: Stage1Facts, runId: str
         computation: cost.computation,
         narrative: cost.narrative,
       });
+      // A swallowed error here means the recap's cost attribution silently
+      // vanishes while the run still reports success — which is exactly how it
+      // went missing once already.
+      if (error) {
+        console.error(`[recap] goal_cost insert failed for ${goal.goal_name}: ${error.message}`);
+      }
     }
   }
 }

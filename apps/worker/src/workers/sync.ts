@@ -257,45 +257,66 @@ async function syncInstitution(
   if (liabilityAccounts.length > 0) {
     try {
       const liab = await plaid.liabilitiesGet({ access_token: token });
-      const ids = liabilityAccounts.map((a) => a.id);
-      await db.from("liabilities").delete().in("account_id", ids);
+      // Upsert on (account_id, type), never delete-and-replace. Replacing gave
+      // every liability a new id on every sync, which silently orphaned the
+      // goal_links rows pointing at them — goal_links is polymorphic, so no
+      // foreign key existed to catch it and goal cost attribution just stopped.
+      const seen: { account_id: string; type: string }[] = [];
       for (const c of liab.data.liabilities.credit ?? []) {
         const account = c.account_id ? accountsByPlaidId.get(c.account_id) : null;
         if (!account) continue;
         const apr = c.aprs?.find((x) => x.apr_type === "purchase_apr") ?? c.aprs?.[0];
-        await db.from("liabilities").insert({
+        seen.push({ account_id: account.id, type: "credit" });
+        await db.from("liabilities").upsert({
           account_id: account.id,
           type: "credit",
           apr: apr?.apr_percentage ?? null,
           minimum_payment: c.minimum_payment_amount ?? null,
           next_due_date: c.next_payment_due_date ?? null,
           balance: c.last_statement_balance ?? null,
-        });
+        }, { onConflict: "account_id,type" });
       }
       for (const s of liab.data.liabilities.student ?? []) {
         const account = s.account_id ? accountsByPlaidId.get(s.account_id) : null;
         if (!account) continue;
-        await db.from("liabilities").insert({
+        seen.push({ account_id: account.id, type: "student" });
+        await db.from("liabilities").upsert({
           account_id: account.id,
           type: "student",
           apr: s.interest_rate_percentage ?? null,
           minimum_payment: s.minimum_payment_amount ?? null,
           next_due_date: s.next_payment_due_date ?? null,
           balance: null,
-        });
+        }, { onConflict: "account_id,type" });
       }
       for (const m of liab.data.liabilities.mortgage ?? []) {
         const account = m.account_id ? accountsByPlaidId.get(m.account_id) : null;
         if (!account) continue;
-        await db.from("liabilities").insert({
+        seen.push({ account_id: account.id, type: "mortgage" });
+        await db.from("liabilities").upsert({
           account_id: account.id,
           type: "mortgage",
           apr: m.interest_rate?.percentage ?? null,
           minimum_payment: m.next_monthly_payment ?? null,
           next_due_date: m.next_payment_due_date ?? null,
           balance: null,
-        });
+        }, { onConflict: "account_id,type" });
       }
+
+      // Drop only what Plaid stopped reporting — a closed card — rather than
+      // everything. Anything still present keeps the id it has always had.
+      const keep = new Set(seen.map((s) => `${s.account_id}:${s.type}`));
+      const { data: existingLiabs } = await db
+        .from("liabilities")
+        .select("id, account_id, type")
+        .in(
+          "account_id",
+          liabilityAccounts.map((a) => a.id)
+        );
+      const stale = (existingLiabs ?? [])
+        .filter((l) => !keep.has(`${l.account_id}:${l.type}`))
+        .map((l) => l.id);
+      if (stale.length) await db.from("liabilities").delete().in("id", stale);
     } catch (e: unknown) {
       // Non-fatal: not every issuer exposes liabilities for every Item.
       console.error(`[sync] liabilities for ${inst.name}: ${plaidError(e).summary}`);

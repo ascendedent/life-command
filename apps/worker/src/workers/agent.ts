@@ -5,7 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { audit } from "@finance/shared";
 // The grounding gate lives with the recap because that is where it was first
 // needed; it is not recap-specific and the agent is held to the same rule.
-import { verifyGrounding } from "@finance/shared/src/recap";
+import { verifyGrounding, verifyAccountReferences } from "@finance/shared/src/recap";
 
 // Agent worker v1 (spec Phase 2, §8 prompt contract): assembles a derived
 // financial snapshot, calls Claude, and writes ADVISORY recommendations only —
@@ -40,6 +40,7 @@ Rules:
 - Every number you write must appear verbatim in the snapshot. Do not add, subtract, average or round figures together — not even correctly. This is checked after the fact and a single unsourced figure discards the entire run, so if you want a total, use one from \`totals\`; if the total you want isn't there, describe the parts instead.
 - Only surface recommendations that are genuinely worth the owner's attention: unusual spend, credit utilization risks, upcoming recurring charges that look wrong, cash-flow trends, idle cash, subscription anomalies. Zero recommendations is a valid answer.
 - The owner has seen your last recommendations and their outcomes (provided). Do not repeat rejected or recently-made recommendations without new supporting data.
+- Refer to an account only by its exact \`label\` from the snapshot. Never pair an account name with a last-four yourself: several accounts share a name and differ only by mask, so a name you assemble is a different account from the one you meant. This is checked, and a mismatch discards the run.
 - Amounts follow the snapshot's convention: positive transaction amounts are outflows.
 - Autonomy is level 0: analysis only. Never propose specific trades or transfers yet — frame findings as alerts.`;
 
@@ -129,6 +130,11 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
     totals,
     // masked: name + last-4 only, never full identifiers (spec §7.7)
     accounts: (accounts ?? []).map((a) => ({
+      // One pre-joined string to quote, because pairing a name with a mask is
+      // a step the model gets wrong and does not need to take: three cards read
+      // "Quicksilver" and three read "CREDIT CARD", so the mask is the only
+      // thing that identifies them and it must travel with the name.
+      label: `${a.name} ‥${a.mask ?? "????"}`,
       name: a.name,
       last4: a.mask,
       type: a.type,
@@ -242,10 +248,35 @@ export async function runAgentAnalysis(
     // agent is held to the same standard its narrative sibling is. A single
     // unsourced number fails the run: nothing is written, because an advisory
     // that quotes a balance you don't have is worse than no advisory.
-    const grounding = verifyGrounding(
-      recs.flatMap((r) => [r.summary, r.rationale]),
-      snapshot
+    const texts = recs.flatMap((r) => [r.summary, r.rationale]);
+
+    // Right number, wrong card is still wrong. Checked separately because
+    // grounding has nothing to say about which account a real figure belongs to.
+    const refs = verifyAccountReferences(
+      texts,
+      (snapshot.accounts as { name: string; last4: string | null }[]) ?? []
     );
+    if (!refs.ok) {
+      await db
+        .from("agent_runs")
+        .update({
+          finished_at: new Date().toISOString(),
+          tokens_used: tokensUsed,
+          status: "failed",
+          error: `misattributed accounts: ${refs.violations
+            .slice(0, 5)
+            .map((v) => `"${v.name}" cited as …${v.cited} (is ${v.valid.join("/")})`)
+            .join("; ")}`,
+        })
+        .eq("id", run.id);
+      await audit(db, "agent", "analysis_rejected_misattributed", "agent_runs", run.id, {
+        violations: refs.violations.slice(0, 20),
+      });
+      console.error(`[agent] run rejected: ${refs.violations.length} misattributed account(s)`);
+      return;
+    }
+
+    const grounding = verifyGrounding(texts, snapshot);
     if (!grounding.ok) {
       await db
         .from("agent_runs")
