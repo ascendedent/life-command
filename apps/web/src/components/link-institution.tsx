@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { usePlaidLink } from "react-plaid-link";
 import { Landmark, Loader2, RefreshCw } from "lucide-react";
@@ -16,6 +16,24 @@ interface LinkedAccount {
   mask: string | null;
   is_business: boolean;
   business_entity: string | null;
+}
+
+/**
+ * Plaid Link locks background scrolling (overflow:hidden on body/html) while
+ * its iframe overlay is open, and releases the lock during teardown. Clearing
+ * the token — or unmounting — destroys the handler, and if that happens before
+ * teardown finishes the lock survives: the page then cannot scroll at all, by
+ * wheel or keyboard, until it is reloaded.
+ *
+ * Releasing it ourselves is idempotent and safe even while Link is still open,
+ * because the overlay is fixed-position and does not depend on the lock.
+ */
+function releaseScrollLock() {
+  if (typeof document === "undefined") return;
+  for (const el of [document.body, document.documentElement]) {
+    el.style.removeProperty("overflow");
+    el.style.removeProperty("position");
+  }
 }
 
 /**
@@ -58,6 +76,7 @@ export function LinkInstitution({
       metadata: { institution?: { name: string; institution_id: string } | null }
     ) => {
       setLinkToken(null);
+      releaseScrollLock();
       if (!publicToken) return;
       if (institutionId) {
         // relink/update mode: token unchanged, just refresh
@@ -84,10 +103,21 @@ export function LinkInstitution({
   const { open, ready } = usePlaidLink({
     token: linkToken,
     onSuccess,
-    onExit: () => setLinkToken(null),
+    onExit: () => {
+      setLinkToken(null);
+      releaseScrollLock();
+    },
   });
 
-  if (linkToken && ready) open();
+  // Opening during render fires on every re-render and races React's commit;
+  // an effect opens exactly once per issued token.
+  useEffect(() => {
+    if (linkToken && ready) open();
+  }, [linkToken, ready, open]);
+
+  // Last line of defence: if this unmounts while Link is mid-teardown (the
+  // success path swaps in the business-flag dialog), release the lock anyway.
+  useEffect(() => releaseScrollLock, []);
 
   if (flagStep) {
     return (
