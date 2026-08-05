@@ -22,7 +22,7 @@ interface Anticipation {
   reconciliation_confidence: number | null;
   reconciliation_factors: (Record<string, unknown> & { candidate_transaction_id?: string }) | null;
   email_receipt_id: string | null;
-  email_receipts?: { mailbox: string | null; email_ref: string | null } | null;
+  email_receipts?: { mailbox: string | null; email_ref: string | null; sender_domain?: string | null } | null;
 }
 
 function MailboxLine({ ant }: { ant: Anticipation }) {
@@ -80,7 +80,7 @@ export function ReceiptsTab() {
     const [{ data: ants }, { data: recs }] = await Promise.all([
       supabase
         .from("anticipated_transactions")
-        .select("*, email_receipts (mailbox, email_ref)")
+        .select("*, email_receipts (mailbox, email_ref, sender_domain)")
         .in("status", ["open", "expired_review", "quarantined"])
         .order("created_at", { ascending: false }),
       supabase
@@ -173,6 +173,49 @@ export function ReceiptsTab() {
   async function setAntStatus(ant: Anticipation, patch: Record<string, unknown>) {
     await supabase.from("anticipated_transactions").update(patch).eq("id", ant.id);
     load();
+  }
+
+  /**
+   * "Not an expense" — a false positive, not a disputed charge.
+   *
+   * Dismisses the anticipation, marks the source email as never-a-receipt, and
+   * offers to remember the sender so the ingester stops proposing it. That
+   * last part is what stops this being whack-a-mole: a 401(k) confirmation or
+   * a statement will otherwise come back every month.
+   */
+  async function notAnExpense(ant: Anticipation) {
+    const domain = ant.email_receipts?.sender_domain ?? null;
+    const remember =
+      domain &&
+      confirm(
+        `Ignore this charge.\n\nAlso stop treating mail from "${domain}" as receipts?\n\nOK = remember the sender · Cancel = just this one`
+      );
+
+    if (ant.email_receipt_id) {
+      await supabase
+        .from("email_receipts")
+        .update({ match_status: "ignored" })
+        .eq("id", ant.email_receipt_id);
+    }
+    if (remember && domain) {
+      await supabase.from("receipt_sender_rules").upsert(
+        {
+          match_type: "domain",
+          pattern: domain,
+          action: "ignore",
+          note: `Marked not-an-expense from ${ant.vendor}`,
+        },
+        { onConflict: "match_type,pattern" }
+      );
+    }
+    await supabase.from("audit_log").insert({
+      actor: "user",
+      action: "receipt_not_an_expense",
+      entity: "anticipated_transactions",
+      entity_id: ant.id,
+      detail: { vendor: ant.vendor, amount: ant.amount, sender_rule: remember ? domain : null },
+    });
+    await setAntStatus(ant, { status: "dismissed" });
   }
 
   async function flagFraud(ant: Anticipation) {
@@ -293,16 +336,30 @@ export function ReceiptsTab() {
                   <span className="text-xs text-muted-foreground">
                     expires {ant.expires_at ? new Date(ant.expires_at).toLocaleDateString() : "—"}
                   </span>
-                  {ant.verification_state === "unverified_vendor" && (
-                    <span className="ml-auto flex gap-1.5">
-                      <Button size="sm" variant="outline" onClick={() => setAntStatus(ant, { verification_state: "user_approved" })}>
-                        Approve
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setAntStatus(ant, { status: "dismissed" })}>
-                        Reject
-                      </Button>
-                    </span>
-                  )}
+                  <span className="ml-auto flex gap-1.5">
+                    {ant.verification_state === "unverified_vendor" && (
+                      <>
+                        <Button size="sm" variant="outline" onClick={() => setAntStatus(ant, { verification_state: "user_approved" })}>
+                          Approve
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setAntStatus(ant, { status: "dismissed" })}>
+                          Reject
+                        </Button>
+                      </>
+                    )}
+                    {/* Distinct from Reject: Reject says "this charge is wrong",
+                        this says "this sender never produces expenses" and
+                        teaches the ingester so it stops asking. */}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-muted-foreground"
+                      title="Not an expense — ignore this and stop counting this sender"
+                      onClick={() => notAnExpense(ant)}
+                    >
+                      Not an expense
+                    </Button>
+                  </span>
                   <MailboxLine ant={ant} />
                 </div>
               ))}

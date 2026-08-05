@@ -3,6 +3,11 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { audit, decryptSecret, merchantKey } from "@finance/shared";
+import {
+  applyTotalLabel,
+  learnTotalLabel,
+  TEMPLATE_MISS_LIMIT,
+} from "./receipt-templates.js";
 
 // Gmail receipt ingestion, Path B (spec §1.7): tight-loop poll for receipt
 // emails, permissive anticipation gated only on sender legitimacy, watchlist
@@ -111,17 +116,229 @@ function decodeBody(payload: Record<string, unknown>): string {
     .slice(0, 20000);
 }
 
-function extractTotal(text: string): number | null {
-  const labeled = [
-    ...text.matchAll(/(?:(?:order|grand|invoice)\s+total|total|amount(?:\s+(?:charged|due|paid))?|charged|paid|payment)[^$\d]{0,40}\$\s?([\d,]+\.\d{2})/gi),
-  ];
-  if (labeled.length) {
-    return Number(labeled[labeled.length - 1][1].replace(/,/g, ""));
+/**
+ * Amounts that are never what you paid. Deliberately narrow: "discount" and
+ * "off" are NOT here, because a real total legitimately reads "Order total —
+ * includes all fees, taxes and discounts $35.60", and excluding it would throw
+ * away the right answer to avoid the wrong one.
+ */
+const NOT_A_CHARGE =
+  /(?:you\s+saved|saved\s+a\s+total|savings|cash\s?back|rewards?\b|estimated\s+\w+\s+cash|\bpoints\b|\btip\b|\bbalance\b)/i;
+
+/** Wording that names the actual amount charged. */
+const STRONG_TOTAL =
+  /(?:order|grand|invoice|purchase)\s+total|total\s+(?:charged|paid|billed)|amount\s+(?:charged|paid|billed)/i;
+/** Weaker hints — a bare "total", or payment wording. */
+const WEAK_TOTAL = /\btotal\b|\bamount\s+due\b|\bpayment\b|\bcharged\b|\bpaid\b/i;
+
+export interface ExtractedTotal {
+  total: number | null;
+  /** True when the amount sat next to explicit total wording — trust it. */
+  labeled: boolean;
+}
+
+/**
+ * Pick the amount actually charged.
+ *
+ * Ranked by how the surrounding text describes each figure, not by where it
+ * sits on the page. Taking the last labelled match used to grab "You saved a
+ * total of $11.80" out of an order whose real total was $35.60, because that
+ * phrase contains the word "total" and appears further down.
+ */
+export function extractTotal(text: string): ExtractedTotal {
+  let best: { value: number; score: number } | null = null;
+  let prevEnd = 0;
+
+  for (const m of text.matchAll(/\$\s?([\d,]+\.\d{2})/g)) {
+    const at = m.index ?? 0;
+    // Look back only as far as the previous amount: "You earned cash back
+    // $5.00 Order total $74.20" must not let the first figure's wording
+    // disqualify the second.
+    const before = text.slice(Math.max(prevEnd, at - 80), at);
+    prevEnd = at + m[0].length;
+    if (NOT_A_CHARGE.test(before)) continue;
+
+    const score = STRONG_TOTAL.test(before) ? 2 : WEAK_TOTAL.test(before) ? 1 : 0;
+    const value = Number(m[1].replace(/,/g, ""));
+    // Later matches win ties, so a repeated total near the end still lands.
+    if (!best || score >= best.score) best = { value, score };
   }
-  const any = [...text.matchAll(/\$\s?([\d,]+\.\d{2})/g)].map((m) =>
-    Number(m[1].replace(/,/g, ""))
-  );
-  return any.length ? Math.max(...any) : null;
+
+  if (!best) return { total: null, labeled: false };
+  return { total: best.value, labeled: best.score > 0 };
+}
+
+// ---------- banks are not merchants ------------------------------------------
+
+/**
+ * A bank or card issuer emailing you is sending a statement, a transaction
+ * alert, a payment-due notice or a fraud warning — never a purchase receipt.
+ *
+ * Ingesting one creates a phantom anticipation named after the *card*, which
+ * then tries to reconcile against the very transaction it was describing:
+ * "Is Getoutpass the same as Capital One | Quicksilver?" The answer is neither
+ * yes nor no — the question should never have been asked.
+ *
+ * Two signals, because neither is complete alone:
+ *   - issuer domains common enough to name outright;
+ *   - the institutions actually linked through Plaid, which makes this
+ *     self-configuring for whichever banks a given owner uses.
+ * Deliberately excluded: PayPal, Apple, Google, Amazon — payment processors
+ * and marketplaces that do send genuine receipts.
+ */
+const ISSUER_DOMAIN_HINTS = [
+  "capitalone", "chase", "discover", "americanexpress", "amex", "citi",
+  "citibank", "wellsfargo", "bankofamerica", "bofa", "usbank", "synchrony",
+  "barclay", "onepay", "sofi", "ally", "navyfederal", "schwab", "fidelity",
+  "vanguard", "creditkarma", "experian", "equifax", "transunion", "creditone",
+  "firstpremier", "mercury", "brex", "ramp", "creditunion", "fcu", "bank",
+];
+
+/** Statement/alert phrasing that a purchase receipt would not use. */
+const STATEMENT_SUBJECT_HINTS = [
+  "statement", "minimum payment", "payment due", "autopay", "balance alert",
+  "transaction alert", "your account", "credit score", "available credit",
+  "payment received", "payment posted", "card ending",
+];
+
+/**
+ * Money moving is not money spent.
+ *
+ * Transfers, deposits, payroll and retirement contributions all arrive as
+ * confirmations carrying a real dollar amount, so nothing upstream flags them —
+ * but none of them is an expense, and a "vendor" like
+ * "Online Transfer to CHK ...4321 transaction#: 10293847561" is a bank
+ * descriptor rather than a merchant. Matched against the parsed vendor and the
+ * subject, since either may carry the giveaway.
+ */
+const NON_PURCHASE_PATTERNS = [
+  /\bonline transfer\b/i,
+  /\btransfer (?:to|from)\b/i,
+  /\bwire transfer\b/i,
+  /\bach (?:credit|debit|transfer)\b/i,
+  /\bdirect deposit\b/i,
+  /\bzelle\b/i,
+  /\bbill\s?pay\b/i,
+  /\btransaction\s?#/i,
+  /\bconfirmation\s?#/i,
+  /\b401\s?\(?k\)?\b/i,
+  /\b(?:roth|ira|hsa|fsa)\b/i,
+  /\bpayroll\b/i,
+  /\bpay(?:check|stub)\b/i,
+  /\bcontribution\b/i,
+  /\bdeposit (?:posted|received|confirmation)\b/i,
+  /\bwithdrawal\b/i,
+  /\bbalance transfer\b/i,
+  /\bautopay\b/i,
+];
+
+export function looksLikeMoneyMovement(vendor: string | null, subject: string): boolean {
+  const hay = `${vendor ?? ""} ${subject}`;
+  return NON_PURCHASE_PATTERNS.some((re) => re.test(hay));
+}
+
+/**
+ * A price quoted in a notice is not a price you were charged.
+ *
+ * "Your subscription is expiring — eero Plus $99.99/year" extracts cleanly and
+ * describes a charge that has not happened and may never happen. Kept tight on
+ * purpose: the model is the general-purpose judge, and over-broad patterns here
+ * would silently drop real receipts, which is the more expensive mistake.
+ */
+const FUTURE_NOTICE_PATTERNS = [
+  /\b(?:is|are|will be)\s+expiring\b/i,
+  /\bexpir(?:es|ing)\s+(?:on|soon|in)\b/i,
+  /\bwill\s+(?:expire|renew|be charged|be billed)\b/i,
+  /\brenews?\s+(?:on|automatically)\b/i,
+  /\bauto-?renew/i,
+  /\bupcoming\s+(?:charge|payment|renewal|bill|invoice)\b/i,
+  /\bscheduled\s+(?:for|to)\s+(?:renew|charge|bill)/i,
+  /\bpayment\s+reminder\b/i,
+  /\byour\s+(?:free\s+)?trial\b/i,
+  /\bprice\s+(?:change|increase)\b/i,
+  /\bupdate\s+your\s+payment\b/i,
+];
+
+export function looksLikeFutureNotice(vendor: string | null, subject: string): boolean {
+  const hay = `${vendor ?? ""} ${subject}`;
+  return FUTURE_NOTICE_PATTERNS.some((re) => re.test(hay));
+}
+
+export function looksFinancialSender(opts: {
+  from: string;
+  senderDomain: string | null;
+  vendor: string | null;
+  subject: string;
+  institutionNames: string[];
+}): boolean {
+  const domain = (opts.senderDomain ?? "").toLowerCase();
+  const from = opts.from.toLowerCase();
+  const vendor = (opts.vendor ?? "").toLowerCase();
+  const subject = opts.subject.toLowerCase();
+
+  if (ISSUER_DOMAIN_HINTS.some((h) => domain.includes(h))) return true;
+
+  // A linked institution's name showing up as the "merchant" is the giveaway:
+  // "Capital One | Quicksilver", "OnePay CashRewards Card".
+  for (const name of opts.institutionNames) {
+    const n = name.toLowerCase().trim();
+    if (n.length < 4) continue;
+    if (vendor.includes(n) || from.includes(n)) return true;
+  }
+
+  // Issuer language in the subject, but only from an unrecognised merchant —
+  // a real receipt saying "payment received" still has a merchant vendor.
+  if (!vendor && STATEMENT_SUBJECT_HINTS.some((h) => subject.includes(h))) return true;
+
+  return false;
+}
+
+async function loadInstitutionNames(db: SupabaseClient): Promise<string[]> {
+  const { data } = await db.from("institutions").select("name");
+  return (data ?? []).map((i: { name: string }) => i.name).filter(Boolean);
+}
+
+export interface SenderRule {
+  match_type: "domain" | "address" | "vendor";
+  pattern: string;
+  action: "ignore" | "allow";
+}
+
+export async function loadSenderRules(db: SupabaseClient): Promise<SenderRule[]> {
+  const { data } = await db
+    .from("receipt_sender_rules")
+    .select("match_type, pattern, action");
+  return (data ?? []) as SenderRule[];
+}
+
+/**
+ * The owner's explicit verdict on a sender, which outranks every heuristic.
+ * Returns "ignore", "allow", or null when no rule applies.
+ *
+ * Domain matching is suffix-aware so a rule on "capitalone.com" also covers
+ * "notification.capitalone.com" — nobody should have to enumerate subdomains.
+ */
+export function senderRuleVerdict(
+  rules: SenderRule[],
+  opts: { from: string; senderDomain: string | null; vendor: string | null }
+): "ignore" | "allow" | null {
+  const from = opts.from.toLowerCase();
+  const domain = (opts.senderDomain ?? "").toLowerCase();
+  const vendor = (opts.vendor ?? "").toLowerCase();
+
+  const matches = (r: SenderRule) => {
+    const p = r.pattern.toLowerCase().trim();
+    if (!p) return false;
+    if (r.match_type === "domain") return domain === p || domain.endsWith(`.${p}`);
+    if (r.match_type === "address") return from.includes(p);
+    return vendor.includes(p);
+  };
+
+  // An explicit allow beats an ignore, so rescuing one sender from a broad
+  // domain rule does not require deleting the domain rule.
+  if (rules.some((r) => r.action === "allow" && matches(r))) return "allow";
+  if (rules.some((r) => r.action === "ignore" && matches(r))) return "ignore";
+  return null;
 }
 
 // ---------- LLM fallback parse (spec §1.7: optional LLM parse) ----------------
@@ -129,7 +346,7 @@ function extractTotal(text: string): number | null {
 const ReceiptParseSchema = z.object({
   is_purchase_receipt: z
     .boolean()
-    .describe("True only for an actual purchase/order/payment confirmation — not shipping updates, newsletters, statements, or mail previews"),
+    .describe("True ONLY for an actual purchase/order/payment confirmation from the merchant that sold something. False for anything sent by a bank or card issuer — statements, transaction alerts, payment-due or payment-received notices, balance and fraud alerts — and for shipping updates, newsletters, and mail previews. A credit card company telling you about a charge is not a receipt for that charge."),
   vendor: z.string().describe("The merchant name, cleanly formatted"),
   total: z.number().nullable().describe("The final amount charged, null if none stated"),
   card_last4: z.string().nullable().describe("Last 4 digits of the payment card if mentioned"),
@@ -485,6 +702,20 @@ async function backfillUnparsed(db: SupabaseClient, conns: GmailConnection[]): P
 }
 
 async function pollMailbox(db: SupabaseClient, conn: GmailConnection): Promise<void> {
+  // Linked-bank names make issuer detection self-configuring per install.
+  const institutionNames = await loadInstitutionNames(db);
+  const senderRules = await loadSenderRules(db);
+
+  const { data: templateRows } = await db
+    .from("vendor_receipt_templates")
+    .select("vendor_key, total_label, hits, misses, status")
+    .neq("status", "disabled");
+  const templates = new Map<string, { total_label: string | null; hits: number; misses: number }>(
+    (templateRows ?? []).map((t: any) => [
+      t.vendor_key,
+      { total_label: t.total_label, hits: t.hits ?? 0, misses: t.misses ?? 0 },
+    ])
+  );
   const token = await getAccessToken(db, conn);
   if (!token) return;
 
@@ -534,17 +765,42 @@ async function pollMailbox(db: SupabaseClient, conn: GmailConnection): Promise<v
 
       const body = decodeBody(msg.payload ?? {});
       const subject = header(headers, "Subject");
-      let total = extractTotal(`${subject} ${body}`);
+      const extracted = extractTotal(`${subject} ${body}`);
+      let total = extracted.total;
       let last4 = extractLast4(body);
       let parsedVendor: string | null = null;
       let llmResult: Awaited<ReturnType<typeof llmParseReceipt>> = null;
       const receivedAt = new Date(Number(msg.internalDate)).toISOString();
 
+      // A layout learned from this vendor's first receipt outranks every
+      // heuristic: it is what this vendor actually calls the amount charged.
+      const templateKey = merchantKey(senderDomain ?? vendor);
+      const template = templates.get(templateKey) ?? null;
+      let templateHit = false;
+      if (template?.total_label) {
+        const fromTemplate = applyTotalLabel(body, template.total_label);
+        if (fromTemplate != null) {
+          total = fromTemplate;
+          templateHit = true;
+        }
+      }
+
       // regex came up empty on a verified sender → let the model read it
-      if (total == null && senderVerified) {
+      // Classification is not optional, and must not be skipped just because
+      // the regex found a number. "Your subscription is expiring — $99.99/year"
+      // parses perfectly and is not a purchase; under the old order (only ask
+      // the model when extraction failed) that notice became a phantom charge.
+      // Extraction still prefers the regex; the model decides what it *is*.
+      if (senderVerified) {
         llmResult = await llmParseReceipt(subject, from, body);
         if (llmResult) {
-          total = llmResult.total;
+          // Precedence: learned template > labelled total > the model >
+          // an unlabelled guess. The guess is what picks up reward balances
+          // and shipping costs, so it loses to an actual reading of the page.
+          if (!templateHit) {
+            if (!extracted.labeled && llmResult.total != null) total = llmResult.total;
+            else if (total == null) total = llmResult.total;
+          }
           last4 = last4 ?? llmResult.card_last4;
           parsedVendor = llmResult.vendor || null;
         }
@@ -564,8 +820,78 @@ async function pollMailbox(db: SupabaseClient, conn: GmailConnection): Promise<v
         if (dupe?.length) continue;
       }
 
-      const isNoise = llmResult != null && !llmResult.is_purchase_receipt;
       const finalVendor = parsedVendor ?? vendor;
+
+      // Why this might not be a purchase, in precedence order. The owner's own
+      // rule outranks every heuristic; the deterministic checks outrank the
+      // model, because a false positive here invents a purchase that never
+      // happened and then asks you to reconcile it.
+      const verdict = senderRuleVerdict(senderRules, { from, senderDomain, vendor: finalVendor });
+      let ignoreReason: string | null = null;
+      if (verdict === "ignore") {
+        ignoreReason = "sender rule";
+      } else if (verdict !== "allow") {
+        if (looksFinancialSender({ from, senderDomain, vendor: finalVendor, subject, institutionNames })) {
+          ignoreReason = "bank or card issuer";
+        } else if (looksLikeMoneyMovement(finalVendor, subject)) {
+          ignoreReason = "money movement, not a purchase";
+        } else if (llmResult != null && !llmResult.is_purchase_receipt) {
+          ignoreReason = "not a purchase receipt";
+        }
+      }
+
+      const isNoise = ignoreReason != null;
+
+      // Learn this vendor's layout from the model's answer — once. The label
+      // is derived mechanically from where the confirmed total sits in the
+      // text, so no second model call is needed and the rule is inspectable.
+      if (!isNoise && llmResult?.is_purchase_receipt && total != null) {
+        if (templateHit) {
+          await db
+            .from("vendor_receipt_templates")
+            .update({ hits: (template!.hits ?? 0) + 1, status: "learned", misses: 0 })
+            .eq("vendor_key", templateKey);
+        } else if (!template) {
+          const label = learnTotalLabel(body, total);
+          if (label) {
+            await db.from("vendor_receipt_templates").upsert(
+              {
+                vendor_key: templateKey,
+                vendor_name: parsedVendor ?? vendor,
+                sender_domain: senderDomain,
+                total_label: label,
+                learned_from: id,
+                learned_total: total,
+                confidence: extracted.labeled ? 0.9 : 0.75,
+                status: "learned",
+              },
+              { onConflict: "vendor_key" }
+            );
+            templates.set(templateKey, { total_label: label, hits: 0, misses: 0 });
+            console.log(`[gmail] learned layout for ${parsedVendor ?? vendor}: "${label}" → ${total}`);
+          }
+        } else {
+          // Template exists but did not match this email: the vendor changed
+          // their layout. Count the miss and relearn once it is consistent.
+          const misses = (template.misses ?? 0) + 1;
+          await db
+            .from("vendor_receipt_templates")
+            .update({
+              misses,
+              status: misses >= TEMPLATE_MISS_LIMIT ? "failing" : "learned",
+              ...(misses >= TEMPLATE_MISS_LIMIT
+                ? { total_label: learnTotalLabel(body, total), misses: 0 }
+                : {}),
+            })
+            .eq("vendor_key", templateKey);
+        }
+      }
+
+      if (isNoise) {
+        console.log(
+          `[gmail] ${conn.account_email}: ignored (${ignoreReason}) — ${finalVendor ?? senderDomain ?? from}`
+        );
+      }
 
       const { data: receipt, error } = await db
         .from("email_receipts")
