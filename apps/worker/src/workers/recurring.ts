@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit } from "@finance/shared";
+import { audit, looksLikeMoneyMovement } from "@finance/shared";
 
 // Recurring detection v1 (spec Phase 1): score merchant + cadence + amount
 // regularity over the trailing 400 days; flag price changes and missed
@@ -12,7 +12,28 @@ interface TxnLite {
   date: string;
   account_id: string;
   category_id: string | null;
+  parent_transaction_id: string | null;
   id: string;
+}
+
+/**
+ * Money moving between the owner's own accounts is not a bill.
+ *
+ * A standing $200 transfer to savings and a $5/week P2P payment are both
+ * perfectly regular in amount and cadence, which is exactly what this detector
+ * looks for — the first real run filed both, and marked the P2P one a
+ * *subscription*, which would have put "Acme Bank P2p Trf Pat Doe Ma Web
+ * I" in front of the monthly recap's subscription review asking whether to
+ * cancel it. Excluded two ways: by category group, which is authoritative once
+ * a transfer is categorised, and by descriptor, which catches the ones that
+ * haven't been.
+ */
+async function transferCategoryIds(db: SupabaseClient): Promise<Set<string>> {
+  const { data } = await db
+    .from("categories")
+    .select("id, category_groups!inner(name)")
+    .in("category_groups.name", ["Transfers", "Income"]);
+  return new Set((data ?? []).map((c: { id: string }) => c.id));
 }
 
 function median(nums: number[]): number {
@@ -32,20 +53,42 @@ function cadenceFromGap(days: number): { cadence: string; ok: boolean } {
 
 export async function detectRecurring(db: SupabaseClient): Promise<void> {
   const cutoff = new Date(Date.now() - 400 * 86400_000).toISOString().slice(0, 10);
+  const excluded = await transferCategoryIds(db);
   const { data: txns } = await db
     .from("transactions")
-    .select("id, merchant, merchant_clean, amount, date, account_id, category_id")
+    .select("id, merchant, merchant_clean, amount, date, account_id, category_id, parent_transaction_id")
     .gte("date", cutoff)
     .gt("amount", 0) // outflows only
     .eq("hidden", false)
-    .is("parent_transaction_id", null)
     .order("date");
   if (!txns?.length) return;
 
-  const groups = new Map<string, TxnLite[]>();
+  // A split charge reaches here as its children, because the parent is hidden.
+  // Recurring detection wants the whole charge — a $90 grocery run split into
+  // $60 and $30 is one recurring charge, not two irregular ones — so children
+  // of the same parent are recombined before anything is measured.
+  const bySplit = new Map<string, TxnLite>();
+  const rows: TxnLite[] = [];
   for (const t of txns as TxnLite[]) {
+    if (!t.parent_transaction_id) {
+      rows.push(t);
+      continue;
+    }
+    const merged = bySplit.get(t.parent_transaction_id);
+    if (merged) merged.amount = Number(merged.amount) + Number(t.amount);
+    else {
+      const copy = { ...t, amount: Number(t.amount) };
+      bySplit.set(t.parent_transaction_id, copy);
+      rows.push(copy);
+    }
+  }
+
+  const groups = new Map<string, TxnLite[]>();
+  for (const t of rows) {
     const name = t.merchant_clean ?? t.merchant;
     if (!name) continue;
+    if (t.category_id && excluded.has(t.category_id)) continue;
+    if (looksLikeMoneyMovement(name)) continue;
     const key = `${name}::${t.account_id}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(t);

@@ -128,6 +128,45 @@ export function isGenericDescriptor(key: string): boolean {
   return tokens.every((t) => GENERIC_DESCRIPTOR_WORDS.has(t));
 }
 
+/**
+ * Wording that says money moved rather than money was spent.
+ *
+ * Shared because the same judgement is needed in more than one place and the
+ * two copies would drift: receipt ingestion uses it to refuse a transfer
+ * confirmation, and recurring detection uses it to refuse the descriptor of a
+ * standing transfer that would otherwise be filed as a subscription. Matched
+ * against whatever text identifies the thing — an email subject, a bank
+ * descriptor, a merchant name.
+ */
+const MONEY_MOVEMENT_PATTERNS = [
+  /\bonline transfer\b/i,
+  /\btransfer (?:to|from)\b/i,
+  /\bwire transfer\b/i,
+  /\bach (?:credit|debit|transfer)\b/i,
+  /\bdirect deposit\b/i,
+  /\bzelle\b/i,
+  /\bvenmo\b/i,
+  /\bbill\s?pay\b/i,
+  /\bp2p\b/i,
+  /\btrf\b/i,
+  /\bweb\s?id\b/i,
+  /\btransaction\s?#/i,
+  /\bconfirmation\s?#/i,
+  /\b401\s?\(?k\)?\b/i,
+  /\b(?:roth|ira|hsa|fsa)\b/i,
+  /\bpayroll\b/i,
+  /\bpay(?:check|stub)\b/i,
+  /\bcontribution\b/i,
+  /\bdeposit (?:posted|received|confirmation)\b/i,
+  /\bwithdrawal\b/i,
+  /\bbalance transfer\b/i,
+  /\bautopay\b/i,
+];
+
+export function looksLikeMoneyMovement(text: string): boolean {
+  return MONEY_MOVEMENT_PATTERNS.some((re) => re.test(text));
+}
+
 function titleCase(key: string): string {
   return key
     .toLowerCase()

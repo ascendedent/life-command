@@ -8,6 +8,7 @@ import {
   merchantKey,
   ITEM_CATEGORIES,
   applyReceiptItems,
+  looksLikeMoneyMovement as isMoneyMovement,
 } from "@finance/shared";
 import {
   applyTotalLabel,
@@ -223,30 +224,8 @@ const STATEMENT_SUBJECT_HINTS = [
  * descriptor rather than a merchant. Matched against the parsed vendor and the
  * subject, since either may carry the giveaway.
  */
-const NON_PURCHASE_PATTERNS = [
-  /\bonline transfer\b/i,
-  /\btransfer (?:to|from)\b/i,
-  /\bwire transfer\b/i,
-  /\bach (?:credit|debit|transfer)\b/i,
-  /\bdirect deposit\b/i,
-  /\bzelle\b/i,
-  /\bbill\s?pay\b/i,
-  /\btransaction\s?#/i,
-  /\bconfirmation\s?#/i,
-  /\b401\s?\(?k\)?\b/i,
-  /\b(?:roth|ira|hsa|fsa)\b/i,
-  /\bpayroll\b/i,
-  /\bpay(?:check|stub)\b/i,
-  /\bcontribution\b/i,
-  /\bdeposit (?:posted|received|confirmation)\b/i,
-  /\bwithdrawal\b/i,
-  /\bbalance transfer\b/i,
-  /\bautopay\b/i,
-];
-
 export function looksLikeMoneyMovement(vendor: string | null, subject: string): boolean {
-  const hay = `${vendor ?? ""} ${subject}`;
-  return NON_PURCHASE_PATTERNS.some((re) => re.test(hay));
+  return isMoneyMovement(`${vendor ?? ""} ${subject}`);
 }
 
 /**

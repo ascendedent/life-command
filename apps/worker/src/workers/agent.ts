@@ -3,6 +3,9 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { audit } from "@finance/shared";
+// The grounding gate lives with the recap because that is where it was first
+// needed; it is not recap-specific and the agent is held to the same rule.
+import { verifyGrounding } from "@finance/shared/src/recap";
 
 // Agent worker v1 (spec Phase 2, §8 prompt contract): assembles a derived
 // financial snapshot, calls Claude, and writes ADVISORY recommendations only —
@@ -34,7 +37,7 @@ const AgentOutputSchema = z.object({
 const SYSTEM_PROMPT = `You are the analysis engine of a self-hosted personal finance platform serving exactly one user, its owner. You produce advisory recommendations only — nothing you output is executed; a human reads each one and acknowledges it.
 
 Rules:
-- Every rationale must cite specific numbers present in the provided snapshot. Never invent or compute figures not derivable from it.
+- Every number you write must appear verbatim in the snapshot. Do not add, subtract, average or round figures together — not even correctly. This is checked after the fact and a single unsourced figure discards the entire run, so if you want a total, use one from \`totals\`; if the total you want isn't there, describe the parts instead.
 - Only surface recommendations that are genuinely worth the owner's attention: unusual spend, credit utilization risks, upcoming recurring charges that look wrong, cash-flow trends, idle cash, subscription anomalies. Zero recommendations is a valid answer.
 - The owner has seen your last recommendations and their outcomes (provided). Do not repeat rejected or recently-made recommendations without new supporting data.
 - Amounts follow the snapshot's convention: positive transaction amounts are outflows.
@@ -101,8 +104,29 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
   }
 
   const round = (n: number) => Math.round(n * 100) / 100;
+
+  // Totals the model would otherwise have to add up itself. It is not allowed
+  // to — every figure it cites has to come from here — and its first real run
+  // was rejected for saying "roughly $9,400 across nine cards", which was
+  // correct arithmetic and still a rule violation. The fix is to do the sum,
+  // not to relax the rule.
+  const accountRows = accounts ?? [];
+  const sumBalances = (pred: (a: (typeof accountRows)[number]) => boolean) =>
+    round(accountRows.filter(pred).reduce((s, a) => s + Number(a.current_balance ?? 0), 0));
+  const totals = {
+    liquid: sumBalances((a) => a.type === "depository"),
+    credit_balances: sumBalances((a) => a.type === "credit"),
+    loan_balances: sumBalances((a) => a.type === "loan"),
+    investment: sumBalances((a) => a.type === "investment"),
+    credit_card_count: accountRows.filter((a) => a.type === "credit").length,
+    credit_cards_with_balance: accountRows.filter(
+      (a) => a.type === "credit" && Number(a.current_balance ?? 0) > 0
+    ).length,
+  };
+
   const snapshot = {
     as_of: new Date().toISOString().slice(0, 10),
+    totals,
     // masked: name + last-4 only, never full identifiers (spec §7.7)
     accounts: (accounts ?? []).map((a) => ({
       name: a.name,
@@ -212,6 +236,38 @@ export async function runAgentAnalysis(
     const recs = response.parsed_output.recommendations.filter(
       (r) => r.confidence >= 0 && r.confidence <= 1 && r.expires_in_days >= 1 && r.expires_in_days <= 30
     );
+
+    // The system prompt asks the model to cite only snapshot figures. Asking is
+    // not a guarantee, and the recap already proves the check is cheap — so the
+    // agent is held to the same standard its narrative sibling is. A single
+    // unsourced number fails the run: nothing is written, because an advisory
+    // that quotes a balance you don't have is worse than no advisory.
+    const grounding = verifyGrounding(
+      recs.flatMap((r) => [r.summary, r.rationale]),
+      snapshot
+    );
+    if (!grounding.ok) {
+      await db
+        .from("agent_runs")
+        .update({
+          finished_at: new Date().toISOString(),
+          tokens_used: tokensUsed,
+          status: "failed",
+          error: `ungrounded figures: ${grounding.offenders
+            .slice(0, 8)
+            .map((o) => `${o.value} (${o.context})`)
+            .join("; ")}`,
+        })
+        .eq("id", run.id);
+      await audit(db, "agent", "analysis_rejected_ungrounded", "agent_runs", run.id, {
+        offenders: grounding.offenders.slice(0, 20),
+        checked: grounding.checked,
+      });
+      console.error(
+        `[agent] run rejected: ${grounding.offenders.length} ungrounded figure(s) of ${grounding.checked}`
+      );
+      return;
+    }
     for (const rec of recs) {
       await db.from("recommendations").insert({
         run_id: run.id,

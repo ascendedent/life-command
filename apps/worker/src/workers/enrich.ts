@@ -67,6 +67,8 @@ Rules:
 - Amounts follow the platform convention: positive = money out, negative = money in.
 - Confidence is per transaction. A general-merchandise store (Amazon, Target, Costco) with no other signal is genuinely ambiguous — say so with a low confidence rather than guessing "Shopping" at high confidence.
 - Use the owner's own history of that merchant when it is provided; a merchant they have consistently categorized one way is strong evidence.
+- When a \`descriptor\` is present it is the bank's own text for the charge, and it outranks the cleaned merchant name. It is frequently the only thing that separates a purchase from a payment or a transfer at the same merchant — "Walmart" alone is ambiguous, "WALMART CRD PYMT" is not.
+- Money moving between the owner's own accounts is a transfer, never spending: card payments, transfers to savings, ACH between accounts, and P2P sends belong in the Transfers group whatever the merchant name says.
 - Return one result per input transaction, no more.`;
 
 const BUSINESS_SYSTEM = `You score personal-account transactions for the likelihood that they are business expenses, for a single-user finance platform whose owner runs a business alongside personal spending.
@@ -85,10 +87,13 @@ interface TxnLite {
   amount: number;
   merchant: string | null;
   merchant_clean: string | null;
+  /** The institution's raw descriptor — often the only disambiguating text. */
+  description: string | null;
   category_id: string | null;
   account_id: string;
   plaid_category_primary: string | null;
   plaid_category_detail: string | null;
+  notes: string | null;
 }
 
 function client() {
@@ -121,7 +126,7 @@ async function enrichCategories(
   const { data: rows } = await db
     .from("transactions")
     .select(
-      "id, date, amount, merchant, merchant_clean, category_id, account_id, plaid_category_primary, plaid_category_detail, needs_review, notes"
+      "id, date, amount, merchant, merchant_clean, description, category_id, account_id, plaid_category_primary, plaid_category_detail, needs_review, notes"
     )
     // NULL is the common case for an uncategorized row, and `neq` never matches
     // NULL — spell out the sources we are allowed to overwrite instead.
@@ -168,6 +173,12 @@ async function enrichCategories(
       return {
         ref,
         merchant: name,
+        // The bank's own descriptor, when it says more than the merchant name.
+        // "Walmart" is ambiguous between a grocery run and a card payment;
+        // "WM SUPERCENTER #1234" and "WALMART CRD PYMT" are not. Plaid's
+        // cleaned merchant name throws that distinction away.
+        descriptor:
+          t.description && t.description !== name ? t.description.slice(0, 80) : null,
         amount: t.amount,
         date: t.date,
         plaid_baseline: [t.plaid_category_primary, t.plaid_category_detail].filter(Boolean).join(" / ") || null,
@@ -226,9 +237,22 @@ async function enrichCategories(
           );
         }
       } else {
+        // The reason is the whole point of the flag: it tells the owner what
+        // the model couldn't tell, and it is what stops this transaction being
+        // re-sent every night. Writing a bare space instead lost both — the
+        // "already asked" guard reads this prefix, so 199 rows went back to the
+        // model on every run forever, and any note the owner had written was
+        // overwritten with nothing.
+        // A note the owner wrote themselves is never replaced by ours.
+        const ownerNote =
+          txn.notes && !txn.notes.startsWith(UNSURE_PREFIX) ? txn.notes.trim() : "";
+        const reason = `${UNSURE_PREFIX} ${r.rationale}`;
         await db
           .from("transactions")
-          .update({ needs_review: true, notes: ` ` })
+          .update({
+            needs_review: true,
+            notes: (ownerNote ? `${ownerNote}\n${reason}` : reason).slice(0, 500),
+          })
           .eq("id", txn.id);
         flagged++;
       }
@@ -255,6 +279,21 @@ async function suggestBusiness(
   runId: string
 ): Promise<{ suggested: number; considered: number }> {
   const ninetyDays = new Date(Date.now() - 90 * 86400_000).toISOString().slice(0, 10);
+
+  // Only score what hasn't been scored. A transaction that came back below the
+  // threshold leaves no row behind, so without this the same set is re-scored
+  // every night forever — on this book, 198 transactions and five model calls a
+  // night to reach the same "no" it reached yesterday. New transactions get one
+  // look each; a merchant the owner later confirms as business teaches the map,
+  // which is what changes future calls.
+  const { data: lastRun } = await db
+    .from("audit_log")
+    .select("at")
+    .eq("action", "enrich_business")
+    .order("at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const scoredThrough = (lastRun as { at: string } | null)?.at ?? null;
 
   const [{ data: accounts }, { data: existing }, { data: confirmed }] = await Promise.all([
     db.from("accounts").select("id, name, is_business"),
@@ -289,15 +328,15 @@ async function suggestBusiness(
     }
   }
 
-  const { data: rows } = await db
+  let query = db
     .from("transactions")
     .select("id, date, amount, merchant, merchant_clean, account_id, categories (name)")
     .gte("date", ninetyDays)
     .eq("is_business", false)
     .eq("hidden", false)
-    .gt("amount", 0)
-    .order("date", { ascending: false })
-    .limit(1000);
+    .gt("amount", 0);
+  if (scoredThrough) query = query.gt("created_at", scoredThrough);
+  const { data: rows } = await query.order("date", { ascending: false }).limit(1000);
 
   const candidates = (rows ?? []).filter((t: any) => {
     if (!personalAccounts.has(t.account_id)) return false;

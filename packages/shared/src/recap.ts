@@ -441,8 +441,15 @@ export function verifyGrounding(
       const isSmallCount = Number.isInteger(n) && n >= 0 && n <= 12;
       if (isScore || isYear || isSmallCount) continue;
 
+      // Compared on magnitude, not sign. A hyphen in prose is usually a range
+      // ("$1,510.25-$1,240.00"), and the regex reads the second figure as
+      // negative — which failed a run over a number that was in the facts all
+      // along. Sign is ambiguous here anyway: the platform stores outflows
+      // positive, so the same dollar legitimately appears either way. What
+      // grounding checks is whether the figure exists, not which way it points.
+      const magnitude = Math.abs(n);
       const grounded = [...allowed].some(
-        (a) => Math.abs(a - n) <= Math.max(0.011, Math.abs(a) * 0.005)
+        (a) => Math.abs(Math.abs(a) - magnitude) <= Math.max(0.011, Math.abs(a) * 0.005)
       );
       if (!grounded) {
         const at = match.index ?? 0;
