@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 // deep import: the shared index pulls in node-only modules (crypto, plaid)
-import { merchantKey } from "@finance/shared/src/categorize";
+import { merchantKey, isMixedBasket } from "@finance/shared/src/categorize";
 import { ITEM_CATEGORY_MAP } from "@finance/shared/src/receipt-items";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -147,7 +147,13 @@ export default function TransactionsPage() {
         reviewed_at: new Date().toISOString(),
       })
       .eq("id", txn.id);
-    const key = merchantKey(txn.merchant);
+    // Correcting one transaction must not restate every other one from that
+    // merchant. Amazon sells groceries, electronics and nappies, and one refund
+    // filed by hand taught the map "Amazon = Refunds & Reimbursements", after
+    // which 537 Amazon purchases were recorded as money coming in. The
+    // enrichment pass has always refused to generalise these merchants; this
+    // path did not.
+    const key = isMixedBasket(txn.merchant_clean ?? txn.merchant) ? "" : merchantKey(txn.merchant);
     if (key) {
       await supabase.from("merchant_map").upsert(
         {

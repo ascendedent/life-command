@@ -3,7 +3,7 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { audit } from "@finance/shared";
-import { merchantKey } from "@finance/shared/src/categorize";
+import { merchantKey, isMixedBasket } from "@finance/shared/src/categorize";
 
 // LLM enrichment pass (spec §3.4 and §3.9.2). Runs daily, batched:
 //   1. resolve transactions the deterministic pipeline left Uncategorized, plus
@@ -26,18 +26,6 @@ const UNSURE_PREFIX = "LLM unsure:";
 const BATCH = 40;
 const MAX_PER_RUN = 200;
 
-/**
- * Merchants whose baskets genuinely vary transaction to transaction. A category
- * learned from one of these must never be written back to merchant_map — that
- * is exactly the mistake that makes every Amazon order "Shopping" forever.
- */
-const MIXED_BASKET = [
-  "amazon", "amzn", "costco", "target", "walmart", "sams club", "bj's", "bjs wholesale",
-  "kroger", "meijer", "cvs", "walgreens", "ebay", "etsy", "aliexpress", "temu",
-];
-
-const isMixedBasket = (merchant: string | null) =>
-  !!merchant && MIXED_BASKET.some((m) => merchant.toLowerCase().includes(m));
 
 const CategorizationSchema = z.object({
   ref: z.string().describe("The ref string from the input list, e.g. t3"),

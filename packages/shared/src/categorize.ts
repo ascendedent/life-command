@@ -262,3 +262,30 @@ function finalize(result: CategorizeResult, key: string): CategorizeResult {
   if (!result.merchant_clean && key) result.merchant_clean = titleCase(key);
   return result;
 }
+
+
+/**
+ * Merchants whose baskets genuinely vary transaction to transaction.
+ *
+ * A category learned from one of these must never be written back to
+ * merchant_map. It is the single most destructive thing the app can do to its
+ * own data: correcting one Amazon refund to "Refunds & Reimbursements" taught
+ * the map, and 537 Amazon *purchases* were then filed as refunds — $12,900 of
+ * spending recorded as money coming in. The same slip through Walmart filed 22
+ * grocery runs as "Credit Card Payment", which lives in the transfer group and
+ * is excluded from budgets and cash flow entirely, so that spending vanished.
+ *
+ * Shared deliberately: the enrichment pass has always had this guard, and the
+ * inline correction in the transactions list did not. One list, both callers.
+ */
+export const MIXED_BASKET_MERCHANTS = [
+  "amazon", "amzn", "costco", "target", "walmart", "sams club", "bj's", "bjs wholesale",
+  "kroger", "meijer", "cvs", "walgreens", "ebay", "etsy", "aliexpress", "temu",
+];
+
+/** True when a category learned from this merchant must not be generalised. */
+export function isMixedBasket(merchant: string | null | undefined): boolean {
+  if (!merchant) return false;
+  const m = merchant.toLowerCase();
+  return MIXED_BASKET_MERCHANTS.some((x) => m.includes(x));
+}
