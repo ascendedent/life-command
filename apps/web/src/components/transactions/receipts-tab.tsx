@@ -132,6 +132,13 @@ export function ReceiptsTab() {
         .from("email_receipts")
         .update({ match_status: "resolved", matched_transaction_id: txn.id, resolved_at: new Date().toISOString() })
         .eq("id", ant.email_receipt_id);
+      // The receipt knows what was in the basket; a hand-confirmed match should
+      // get the same item-level treatment the worker applies automatically.
+      await fetch("/api/receipts/apply-items", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ receipt_id: ant.email_receipt_id, transaction_id: txn.id }),
+      }).catch(() => {});
     }
     // Permanent memory — but only of something that can match again. A
     // descriptor like "Online Transfer to CHK ...4321 transaction#: 102938…

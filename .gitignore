@@ -45,5 +45,7 @@ docs/*.pdf
 si-inbox/*
 !si-inbox/.gitkeep
 
-# Local scratch
+# Local scratch — one-off probes and verification harnesses need to live inside
+# the workspace to resolve its packages, but they are not part of the build.
 *.bak
+scratch/

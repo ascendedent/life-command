@@ -5,6 +5,11 @@ import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CategorySelect, type CategoryOption } from "./category-select";
+// deep import: the shared index pulls in node-only modules (crypto, plaid)
+import {
+  ITEM_CATEGORY_MAP,
+  type StoredItemLines,
+} from "@finance/shared/src/receipt-items";
 
 interface Txn {
   id: string;
@@ -15,6 +20,45 @@ interface Txn {
   merchant_clean: string | null;
   is_business: boolean;
   business_entity: string | null;
+  item_lines?: StoredItemLines | null;
+}
+
+/**
+ * Open on the receipt's own basket when there is one.
+ *
+ * A parsed receipt that wasn't confident enough to split itself still knows
+ * more than an empty two-way form does — which categories the order touched,
+ * and what each is worth when the email priced them. Amounts stay blank when it
+ * didn't, because a number nobody can source is worse than no number.
+ */
+function initialParts(
+  txn: Txn,
+  options: CategoryOption[]
+): { amount: string; category_id: string | null }[] {
+  const total = Number(txn.amount);
+  const idOf = (name: string) => options.find((c) => c.name === name)?.id ?? null;
+
+  const plan = txn.item_lines?.plan;
+  if (plan?.parts.length) {
+    return plan.parts.map((p) => ({
+      amount: p.amount.toFixed(2),
+      category_id: idOf(p.categoryName),
+    }));
+  }
+
+  // Items were named but never priced. Offer the categories the basket touched
+  // and leave the amounts to the owner — those are the numbers we don't have.
+  const seen = [
+    ...new Set((txn.item_lines?.coverage.categories ?? []).map((c) => ITEM_CATEGORY_MAP[c])),
+  ];
+  if (seen.length >= 2) {
+    return seen.map((name) => ({ amount: "", category_id: idOf(name) }));
+  }
+
+  return [
+    { amount: (total / 2).toFixed(2), category_id: null },
+    { amount: (total / 2).toFixed(2), category_id: null },
+  ];
 }
 
 export function SplitDialog({
@@ -27,10 +71,7 @@ export function SplitDialog({
   onClose: (changed: boolean) => void;
 }) {
   const total = Number(txn.amount);
-  const [parts, setParts] = useState<{ amount: string; category_id: string | null }[]>([
-    { amount: (total / 2).toFixed(2), category_id: null },
-    { amount: (total / 2).toFixed(2), category_id: null },
-  ]);
+  const [parts, setParts] = useState(() => initialParts(txn, categories));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,6 +129,26 @@ export function SplitDialog({
         <h2 className="text-sm font-semibold">
           Split “{txn.merchant_clean ?? txn.merchant}” — {total.toFixed(2)}
         </h2>
+        {txn.item_lines?.items?.length ? (
+          <div className="mt-2 max-h-40 overflow-y-auto rounded-md border bg-muted/30 p-2">
+            <p className="mb-1 text-[11px] text-muted-foreground">
+              From the receipt — {txn.item_lines.coverage.named} of{" "}
+              {txn.item_lines.coverage.listed} items
+              {txn.item_lines.plan.reason ? `, ${txn.item_lines.plan.reason}` : ""}
+            </p>
+            {txn.item_lines.items.map((i, n) => (
+              <div key={n} className="flex gap-2 text-[11px] leading-tight">
+                <span className="flex-1 truncate">{i.description}</span>
+                <span className="text-muted-foreground">
+                  {i.category ? ITEM_CATEGORY_MAP[i.category] : "—"}
+                </span>
+                <span className="w-14 text-right font-mono">
+                  {i.amount != null ? i.amount.toFixed(2) : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="mt-3 space-y-2">
           {parts.map((p, i) => (
             <div key={i} className="flex items-center gap-2">

@@ -1,6 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit, merchantKey, descriptorKey, isGenericDescriptor } from "@finance/shared";
+import {
+  audit,
+  merchantKey,
+  descriptorKey,
+  isGenericDescriptor,
+  applyReceiptItems,
+} from "@finance/shared";
 import { checkWatchlist } from "./gmail.js";
+
 
 // Reconciliation as a scored linkage layer (spec §1.7.4): when a bank
 // transaction posts, score it against open anticipations on amount, semantic
@@ -172,6 +179,11 @@ export async function reconcileNewTransaction(
           resolved_at: new Date().toISOString(),
         })
         .eq("id", best.ant.email_receipt_id);
+      // Item-level categories, once there is a real transaction to attach them
+      // to. Runs after the category above so the receipt's own basket wins.
+      await applyReceiptItems(db, best.ant.email_receipt_id, txn.id).catch((e: Error) =>
+        console.error("[reconcile] item split failed:", e.message)
+      );
     }
     await learnSignature(db, best.ant.vendor, txn.merchant, best.factors.amount_exact != null);
     await audit(db, "system", "anticipation_reconciled", "anticipated_transactions", best.ant.id, {

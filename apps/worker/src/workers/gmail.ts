@@ -2,12 +2,19 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit, decryptSecret, merchantKey } from "@finance/shared";
+import {
+  audit,
+  decryptSecret,
+  merchantKey,
+  ITEM_CATEGORIES,
+  applyReceiptItems,
+} from "@finance/shared";
 import {
   applyTotalLabel,
   learnTotalLabel,
   TEMPLATE_MISS_LIMIT,
 } from "./receipt-templates.js";
+
 
 // Gmail receipt ingestion, Path B (spec §1.7): tight-loop poll for receipt
 // emails, permissive anticipation gated only on sender legitimacy, watchlist
@@ -96,7 +103,7 @@ function header(headers: { name: string; value: string }[], name: string): strin
   return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
-function decodeBody(payload: Record<string, unknown>): string {
+export function decodeBody(payload: Record<string, unknown>): string {
   const parts: string[] = [];
   function walk(p: Record<string, unknown>) {
     const body = p.body as { data?: string } | undefined;
@@ -269,6 +276,31 @@ export function looksLikeFutureNotice(vendor: string | null, subject: string): b
   return FUTURE_NOTICE_PATTERNS.some((re) => re.test(hay));
 }
 
+/**
+ * Money coming back is not money spent.
+ *
+ * "You're getting a $19.40 refund" is a well-formed receipt in every respect —
+ * verified sender, real merchant, labelled total, itemised — and ingesting it
+ * anticipates a charge that will never post while attaching a refund's paperwork
+ * to the purchase it reverses. Return-pickup and cancellation mail is the same
+ * story told earlier.
+ */
+const REFUND_PATTERNS = [
+  /\brefund(?:ed|ing)?\b/i,
+  /\breturn(?:ed)?\s+(?:is|was|has been|received|initiated|accepted|processed)\b/i,
+  /\byour\s+return\b/i,
+  /\bpick\s?up\s+your\s+return\b/i,
+  /\border\s+(?:was\s+)?cancell?ed\b/i,
+  /\bcancell?ation\s+confirm/i,
+  /\bmoney\s+back\b/i,
+  /\bcredit(?:ed)?\s+to\s+your\s+(?:account|card)\b/i,
+];
+
+export function looksLikeRefund(vendor: string | null, subject: string): boolean {
+  const hay = `${vendor ?? ""} ${subject}`;
+  return REFUND_PATTERNS.some((re) => re.test(hay));
+}
+
 export function looksFinancialSender(opts: {
   from: string;
   senderDomain: string | null;
@@ -348,12 +380,37 @@ export function senderRuleVerdict(
 
 // ---------- LLM fallback parse (spec §1.7: optional LLM parse) ----------------
 
+const ReceiptItemSchema = z.object({
+  description: z.string().describe("The product name as printed on the receipt"),
+  amount: z
+    .number()
+    .nullable()
+    .describe("Line total for this item in dollars, null if the email names the item but never prices it. Do not guess or divide the order total."),
+  qty: z.number().nullable().describe("Quantity if stated, else null"),
+  category: z
+    .enum(ITEM_CATEGORIES)
+    .nullable()
+    .describe("What kind of thing this is. groceries = food and drink to prepare at home, including produce, dairy, snacks and non-alcoholic beverages. household = cleaning, paper goods, kitchen and home supplies. personal_care = toiletries, cosmetics, hygiene. pharmacy = medicine, vitamins, first aid. baby_kids = toys, baby gear, children's items. Use null only when the description is too vague to place."),
+});
+
 const ReceiptParseSchema = z.object({
   is_purchase_receipt: z
     .boolean()
-    .describe("True ONLY for an actual purchase/order/payment confirmation from the merchant that sold something. False for anything sent by a bank or card issuer — statements, transaction alerts, payment-due or payment-received notices, balance and fraud alerts — and for shipping updates, newsletters, and mail previews. A credit card company telling you about a charge is not a receipt for that charge."),
+    .describe("True ONLY for an actual purchase/order/payment confirmation from the merchant that sold something. False for anything sent by a bank or card issuer — statements, transaction alerts, payment-due or payment-received notices, balance and fraud alerts — and for shipping updates, newsletters, and mail previews. A credit card company telling you about a charge is not a receipt for that charge. A refund or return confirmation is money coming back, not a purchase — also false."),
+  document_type: z
+    .enum(["purchase", "refund", "shipping", "order_update", "statement", "notice", "other"])
+    .describe("What this email actually is. 'purchase' only when the merchant is confirming money was charged. 'refund' for refund/return confirmations. 'order_update' for substitutions, cancellations and adjusted-total notices, which quote amounts that were never charged."),
   vendor: z.string().describe("The merchant name, cleanly formatted"),
   total: z.number().nullable().describe("The final amount charged, null if none stated"),
+  subtotal: z.number().nullable().describe("Pre-tax subtotal if stated, else null"),
+  tax: z.number().nullable().describe("Tax if stated, else null"),
+  item_count: z
+    .number()
+    .nullable()
+    .describe("How many items the email says the order contains (e.g. '21 items'), even when it lists fewer. Null if unstated."),
+  line_items: z
+    .array(ReceiptItemSchema)
+    .describe("Items actually purchased in THIS order. Include an item even if it has no price. Never include products from marketing sections — 'Recently viewed items', 'Trending in store', 'Explore more savings', 'Recommended for you', 'Sponsored', 'You might also like' — those were not bought. Empty array if the email lists no items."),
   card_last4: z.string().nullable().describe("Last 4 digits of the payment card if mentioned"),
 });
 
@@ -367,7 +424,7 @@ export async function llmParseReceipt(
     const client = new Anthropic();
     const response = await client.messages.parse({
       model: process.env.RECEIPT_MODEL ?? "claude-sonnet-5",
-      max_tokens: 2000,
+      max_tokens: 4000,
       output_config: {
         effort: "low",
         format: zodOutputFormat(ReceiptParseSchema),
@@ -375,7 +432,7 @@ export async function llmParseReceipt(
       messages: [
         {
           role: "user",
-          content: `Classify and parse this email.\nFrom: ${from}\nSubject: ${subject}\n\nBody (text-stripped):\n${body.slice(0, 6000)}`,
+          content: `Classify and parse this email.\nFrom: ${from}\nSubject: ${subject}\n\nBody (text-stripped):\n${body.slice(0, 8000)}`,
         },
       ],
     });
@@ -610,6 +667,10 @@ async function matchAgainstExisting(
         resolved_at: new Date().toISOString(),
       })
       .eq("id", receiptId);
+    // The receipt knows what was in the basket; the bank only knows the total.
+    await applyReceiptItems(db, receiptId, txn.id).catch((e: Error) =>
+      console.error("[gmail] item split failed:", e.message)
+    );
     return true;
   }
 
@@ -796,7 +857,28 @@ async function pollMailbox(db: SupabaseClient, conn: GmailConnection): Promise<v
       // parses perfectly and is not a purchase; under the old order (only ask
       // the model when extraction failed) that notice became a phantom charge.
       // Extraction still prefers the regex; the model decides what it *is*.
-      if (senderVerified) {
+      //
+      // Unless a deterministic rule has already decided. Issuer mail, transfer
+      // confirmations, refund notices and the owner's own sender rules are
+      // settled without a model, and they are the mail that arrives most often —
+      // asking anyway spends a call per message to be told what we knew.
+      const earlyVerdict = senderRuleVerdict(senderRules, { from, senderDomain, vendor });
+      const earlyIgnore =
+        earlyVerdict === "ignore"
+          ? "sender rule"
+          : earlyVerdict === "allow"
+            ? null
+            : looksFinancialSender({ from, senderDomain, vendor, subject, institutionNames })
+              ? "bank or card issuer"
+              : looksLikeMoneyMovement(vendor, subject)
+                ? "money movement, not a purchase"
+                : looksLikeRefund(vendor, subject)
+                  ? "refund or return, not a purchase"
+                  : looksLikeFutureNotice(vendor, subject)
+                    ? "notice about a future charge"
+                    : null;
+
+      if (senderVerified && !earlyIgnore) {
         llmResult = await llmParseReceipt(subject, from, body);
         if (llmResult) {
           // Precedence: learned template > labelled total > the model >
@@ -812,7 +894,14 @@ async function pollMailbox(db: SupabaseClient, conn: GmailConnection): Promise<v
       }
 
       // cross-mailbox duplicate guard: the same receipt CC'd to two linked
-      // inboxes arrives with different message ids — don't double-anticipate
+      // inboxes arrives with different message ids — don't double-anticipate.
+      //
+      // The duplicate is still recorded. Skipping the insert left the message
+      // absent from email_receipts, so the next poll found it "fresh" again and
+      // re-read it through the model — a loop that ran every 45 seconds and
+      // never terminated, because the only thing that ends it is the row it
+      // wasn't writing.
+      let duplicateOf: string | null = null;
       if (total != null) {
         const { data: dupe } = await db
           .from("email_receipts")
@@ -822,7 +911,7 @@ async function pollMailbox(db: SupabaseClient, conn: GmailConnection): Promise<v
           .gte("received_at", new Date(Date.parse(receivedAt) - 6 * 3600_000).toISOString())
           .lte("received_at", new Date(Date.parse(receivedAt) + 6 * 3600_000).toISOString())
           .limit(1);
-        if (dupe?.length) continue;
+        duplicateOf = dupe?.[0]?.id ?? null;
       }
 
       const finalVendor = parsedVendor ?? vendor;
@@ -831,17 +920,34 @@ async function pollMailbox(db: SupabaseClient, conn: GmailConnection): Promise<v
       // rule outranks every heuristic; the deterministic checks outrank the
       // model, because a false positive here invents a purchase that never
       // happened and then asks you to reconcile it.
+      //
+      // The early checks ran on the From-derived vendor; they run again on the
+      // vendor the model cleaned up, which is often the first time the real
+      // merchant name is legible.
       const verdict = senderRuleVerdict(senderRules, { from, senderDomain, vendor: finalVendor });
-      let ignoreReason: string | null = null;
-      if (verdict === "ignore") {
+      let ignoreReason: string | null = earlyIgnore;
+      if (ignoreReason) {
+        // already settled without a model
+      } else if (duplicateOf) {
+        ignoreReason = "duplicate of a receipt already ingested";
+      } else if (verdict === "ignore") {
         ignoreReason = "sender rule";
       } else if (verdict !== "allow") {
         if (looksFinancialSender({ from, senderDomain, vendor: finalVendor, subject, institutionNames })) {
           ignoreReason = "bank or card issuer";
         } else if (looksLikeMoneyMovement(finalVendor, subject)) {
           ignoreReason = "money movement, not a purchase";
-        } else if (llmResult != null && !llmResult.is_purchase_receipt) {
-          ignoreReason = "not a purchase receipt";
+        } else if (looksLikeRefund(finalVendor, subject)) {
+          ignoreReason = "refund or return, not a purchase";
+        } else if (looksLikeFutureNotice(finalVendor, subject)) {
+          ignoreReason = "notice about a future charge";
+        } else if (
+          llmResult != null &&
+          (!llmResult.is_purchase_receipt || llmResult.document_type !== "purchase")
+        ) {
+          // Either signal is enough. Missing a real receipt costs a manual
+          // match; inventing one puts a charge in the books that never happened.
+          ignoreReason = `not a purchase receipt (${llmResult.document_type})`;
         }
       }
 

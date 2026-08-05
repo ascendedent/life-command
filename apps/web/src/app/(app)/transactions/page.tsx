@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 // deep import: the shared index pulls in node-only modules (crypto, plaid)
 import { merchantKey } from "@finance/shared/src/categorize";
+import { ITEM_CATEGORY_MAP } from "@finance/shared/src/receipt-items";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -92,7 +93,7 @@ export default function TransactionsPage() {
     let q = supabase
       .from("transactions")
       .select(
-        "id, account_id, date, amount, merchant, merchant_clean, description, category_id, category_source, pending, hidden, needs_review, is_business, business_entity, receipt_status, parent_transaction_id, accounts (name)",
+        "id, account_id, date, amount, merchant, merchant_clean, description, category_id, category_source, pending, hidden, needs_review, is_business, business_entity, receipt_status, parent_transaction_id, item_lines, accounts (name)",
         { count: "exact" }
       )
       .order("date", { ascending: false })
@@ -417,6 +418,28 @@ export default function TransactionsPage() {
                           {t.description}
                         </span>
                       )}
+                      {/* What the receipt says was actually in the basket. On a
+                          mixed charge this is the only place the split becomes
+                          arguable, so it names the obstacle rather than hiding
+                          behind a generic "review" flag. */}
+                      {t.item_lines?.items?.length ? (
+                        <span
+                          className="block truncate text-[10px] leading-tight text-muted-foreground"
+                          title={t.item_lines.items
+                            .map(
+                              (i) =>
+                                `${i.description}${i.amount != null ? ` — $${i.amount.toFixed(2)}` : ""}`
+                            )
+                            .join("\n")}
+                        >
+                          🧾 {t.item_lines.coverage.named} of {t.item_lines.coverage.listed} items ·{" "}
+                          {t.item_lines.coverage.categories
+                            .map((c) => ITEM_CATEGORY_MAP[c])
+                            .filter((v, i, a) => a.indexOf(v) === i)
+                            .join(", ")}
+                          {t.item_lines.plan.reason ? ` · ${t.item_lines.plan.reason}` : ""}
+                        </span>
+                      ) : null}
                       <span className="flex gap-1">
                         {t.pending && <Badge variant="secondary">pending</Badge>}
                         {t.needs_review && <Badge variant="warning">review</Badge>}
@@ -458,9 +481,9 @@ export default function TransactionsPage() {
                           ✓
                         </Button>
                       )}
-                      {!t.parent_transaction_id && !t.pending && tab === "all" && (
+                      {!t.parent_transaction_id && !t.pending && (
                         <Button variant="ghost" size="sm" onClick={() => setSplitTxn(t)}>
-                          Split
+                          {t.item_lines?.plan.parts.length ? "Split by items" : "Split"}
                         </Button>
                       )}
                       <Button
