@@ -76,6 +76,58 @@ export function merchantKey(raw: string | null | undefined): string {
     .slice(0, 40);
 }
 
+/**
+ * Normalise a *bank descriptor* into something that can be matched again next
+ * month. Stricter than merchantKey, because descriptors carry per-transaction
+ * noise that merchant names do not.
+ *
+ * "Online Transfer to CHK ...4321 transaction#: 10293847561 07/17" reduces to
+ * "ONLINE TRANSFER TO CHK". merchantKey alone left "07 17" behind, so the
+ * learned alias could never match a later transfer and the same question came
+ * back every month.
+ */
+export function descriptorKey(raw: string | null | undefined): string {
+  if (!raw) return "";
+  return (
+    raw
+      .toUpperCase()
+      // dates in any common shape: 07/17, 07-17-26, 2026-08-05
+      .replace(/\b\d{1,4}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g, " ")
+      // reference / transaction / confirmation numbers, separators optional
+      .replace(
+        /\b(?:TRANSACTION|TRANS|TXN|REF|REFERENCE|CONF|CONFIRMATION|AUTH|TRACE|SEQ|INV)\s*#?\s*:?\s*[A-Z0-9-]{4,}/g,
+        " "
+      )
+      // masked account fragments: ...4321, XXXX4321, ****4321
+      .replace(/[.*X]{2,}\s*\d{2,}/g, " ")
+      .replace(/[#*]\s*:?\s*\d+/g, " ")
+      .replace(/\b\d{4,}\b/g, " ")
+      .replace(/[^A-Z0-9& ]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 40)
+  );
+}
+
+/**
+ * Banking boilerplate that identifies no one. Storing such a descriptor as a
+ * vendor's signature would make every future transfer look like that vendor,
+ * which is worse than having no pattern at all.
+ */
+const GENERIC_DESCRIPTOR_WORDS = new Set([
+  "ONLINE", "TRANSFER", "XFER", "TO", "FROM", "CHK", "CHECKING", "SAV", "SAVINGS",
+  "ACH", "PAYMENT", "PMT", "DEPOSIT", "WITHDRAWAL", "BILL", "PAY", "BILLPAY",
+  "CHECK", "POS", "PURCHASE", "DEBIT", "CREDIT", "CARD", "ELECTRONIC", "WEB",
+  "MOBILE", "BANK", "AUTOPAY", "RECURRING", "INTERNET", "EXTERNAL", "INTERNAL",
+]);
+
+/** True when a normalised descriptor is too generic to identify a vendor. */
+export function isGenericDescriptor(key: string): boolean {
+  const tokens = key.split(" ").filter(Boolean);
+  if (!tokens.length) return true;
+  return tokens.every((t) => GENERIC_DESCRIPTOR_WORDS.has(t));
+}
+
 function titleCase(key: string): string {
   return key
     .toLowerCase()

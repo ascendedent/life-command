@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { merchantKey } from "@finance/shared/src/categorize";
+import { descriptorKey, isGenericDescriptor } from "@finance/shared/src/categorize";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -133,31 +133,40 @@ export function ReceiptsTab() {
         .update({ match_status: "resolved", matched_transaction_id: txn.id, resolved_at: new Date().toISOString() })
         .eq("id", ant.email_receipt_id);
     }
-    // permanent memory: alias + descriptor pattern on the signature
-    const alias = merchantKey(txn.merchant);
-    const { data: sig } = await supabase
-      .from("vendor_signatures")
-      .select("id, name_aliases, descriptor_patterns")
-      .ilike("vendor_name", ant.vendor)
-      .maybeSingle();
-    if (sig) {
-      await supabase
+    // Permanent memory — but only of something that can match again. A
+    // descriptor like "Online Transfer to CHK ...4321 transaction#: 102938…
+    // 07/17" is unique to this one payment; stored verbatim it would never
+    // match, and the same question would return every month. Normalised it
+    // becomes "ONLINE TRANSFER TO CHK", which is the opposite problem — it
+    // would claim every transfer — so that is not stored either.
+    const alias = descriptorKey(txn.merchant);
+    const worthLearning = alias.length > 0 && !isGenericDescriptor(alias);
+
+    if (worthLearning) {
+      const { data: sig } = await supabase
         .from("vendor_signatures")
-        .update({
-          name_aliases: [...new Set([...(sig.name_aliases ?? []), alias])],
-          descriptor_patterns: [...new Set([...(sig.descriptor_patterns ?? []), alias])],
+        .select("id, name_aliases, descriptor_patterns")
+        .ilike("vendor_name", ant.vendor)
+        .maybeSingle();
+      if (sig) {
+        await supabase
+          .from("vendor_signatures")
+          .update({
+            name_aliases: [...new Set([...(sig.name_aliases ?? []), alias])],
+            descriptor_patterns: [...new Set([...(sig.descriptor_patterns ?? []), alias])],
+            source: "user_confirmed",
+          })
+          .eq("id", sig.id);
+      } else {
+        await supabase.from("vendor_signatures").insert({
+          vendor_name: ant.vendor,
+          name_aliases: [alias],
+          descriptor_patterns: [alias],
           source: "user_confirmed",
-        })
-        .eq("id", sig.id);
-    } else {
-      await supabase.from("vendor_signatures").insert({
-        vendor_name: ant.vendor,
-        name_aliases: [alias],
-        descriptor_patterns: [alias],
-        source: "user_confirmed",
-        exact_match_count: 1,
-        reliability: 1,
-      });
+          exact_match_count: 1,
+          reliability: 1,
+        });
+      }
     }
     load();
   }

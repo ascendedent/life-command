@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit, merchantKey } from "@finance/shared";
+import { audit, merchantKey, descriptorKey, isGenericDescriptor } from "@finance/shared";
 import { checkWatchlist } from "./gmail.js";
 
 // Reconciliation as a scored linkage layer (spec §1.7.4): when a bank
@@ -70,7 +70,12 @@ async function learnSignature(
   descriptor: string | null,
   exact: boolean
 ) {
-  const pattern = merchantKey(descriptor);
+  // Only learn a descriptor that can match a future charge: per-transaction
+  // reference numbers and dates are stripped, and what is left is discarded
+  // if it is pure banking boilerplate ("ONLINE TRANSFER TO CHK") that would
+  // otherwise claim every transfer as this vendor.
+  const normalized = descriptorKey(descriptor);
+  const pattern = isGenericDescriptor(normalized) ? "" : normalized;
   const { data: existing } = await db
     .from("vendor_signatures")
     .select("id, descriptor_patterns, exact_match_count, mismatch_count")
