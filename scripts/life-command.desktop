@@ -7,7 +7,11 @@ Exec=/usr/bin/bash "@ROOT@/scripts/stack-ctl.sh" open
 Icon=@ROOT@/assets/icon.svg
 Terminal=false
 Categories=Office;Finance;
-StartupWMClass=life-command
+# Substituted by install-desktop.sh: the class of the window `open` actually
+# spawns. With a Chrome PWA installed that is crx_<per-machine-hash>, not
+# "life-command" — Plasma pins by this value, so a stale one silently unlinks
+# the launcher from its own window.
+StartupWMClass=@WMCLASS@
 Actions=start;stop;restart;status;studio;
 
 [Desktop Action start]

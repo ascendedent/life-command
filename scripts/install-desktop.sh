@@ -23,8 +23,38 @@ done
 # App-menu entry (replaces the old finance-command one if present)
 mkdir -p "$HOME/.local/share/applications"
 rm -f "$HOME/.local/share/applications/finance-command.desktop"
-sed "s|@ROOT@|$ROOT|g" scripts/life-command.desktop \
+
+# Window identity. `stack-ctl.sh open` prefers the installed Chrome PWA, whose
+# window advertises a per-machine class (crx_<hash>) that has nothing to do with
+# our launcher. Plasma matches a window to a launcher by that class, so unless
+# this entry claims the SAME one, the pinned icon and the real window are two
+# unrelated things — the pin stays "not running" while a second task entry
+# appears. The hash is generated per machine and profile, so it can only be
+# discovered here, at install time.
+PWA_DESKTOP="$(grep -ls "^Name=Life Command" \
+  "$HOME/.local/share/applications/"chrome-*-Default.desktop 2>/dev/null | head -1 || true)"
+if [ -n "$PWA_DESKTOP" ]; then
+  WMCLASS="$(sed -n 's/^StartupWMClass=//p' "$PWA_DESKTOP" | head -1)"
+  echo "[install] PWA detected — adopting its window class: ${WMCLASS:-<none>}"
+else
+  # No PWA installed: `open` falls back to `--app` + `--class=life-command`.
+  WMCLASS="life-command"
+  echo "[install] no PWA installed — window class: life-command"
+fi
+[ -n "$WMCLASS" ] || WMCLASS="life-command"
+
+sed -e "s|@ROOT@|$ROOT|g" -e "s|@WMCLASS@|$WMCLASS|g" scripts/life-command.desktop \
   > "$HOME/.local/share/applications/life-command.desktop"
+
+# Two launchers claiming one window is ambiguous — Plasma may bind the window to
+# whichever it finds first. Hide Chrome's generated entry from the menu so ours
+# is the only visible way in; the file must stay on disk because `open` still
+# launches through it.
+if [ -n "$PWA_DESKTOP" ] && ! grep -q "^NoDisplay=true" "$PWA_DESKTOP"; then
+  printf 'NoDisplay=true\n' >> "$PWA_DESKTOP"
+  echo "[install] hid the duplicate Chrome PWA entry from the app menu"
+fi
+
 chmod +x scripts/stack-ctl.sh scripts/tray.py
 
 # Tray controller service (graphical session scoped)

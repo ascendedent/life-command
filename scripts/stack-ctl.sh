@@ -57,12 +57,35 @@ case "${1:-open}" in
     # Close Life Command app windows via KWin scripting. Only touches windows
     # whose class marks them as a PWA/app window — never plain google-chrome
     # (that would take the whole browser with it).
+    # Was a window actually open? KWin script output is not reliably readable
+    # from here, so establish the fact before and after in the shell instead —
+    # a close that matches nothing is a bug, and used to pass silently.
+    app_window_pids() {
+      PWA="$(pwa_desktop)"
+      if [ -n "$PWA" ]; then
+        APPID="$(sed -n 's/.*--app-id=\([a-z]*\).*/\1/p' "$PWA" | head -1)"
+        [ -n "$APPID" ] && pgrep -f -- "--app-id=$APPID" || true
+      fi
+      pgrep -f -- "--class=life-command" || true
+    }
+    BEFORE="$(app_window_pids | wc -l)"
+
     TMP=$(mktemp /tmp/lc-close-XXXXXX.js)
     cat > "$TMP" <<'JS'
+// A Chrome app window identifies differently depending on how it was opened:
+//   crx_<hash>            — installed PWA (what `open` prefers)
+//   chrome-<hash>-Default — PWA, as some Chrome/KWin versions report app_id
+//   life-command          — the plain --app fallback, when no PWA is installed
+// Matching only "chrome-" missed the PWA case entirely, so close matched
+// nothing. Accept all three, and never plain google-chrome — that would take
+// the whole browser down with it.
 workspace.windowList().forEach(function (w) {
   var cls = String(w.resourceClass || "");
   var cap = String(w.caption || "");
-  var isAppWindow = cls.indexOf("chrome-") === 0 || cls === "life-command";
+  var isAppWindow =
+    cls.indexOf("crx_") === 0 ||
+    cls.indexOf("chrome-") === 0 ||
+    cls === "life-command";
   if (isAppWindow && cap.indexOf("Life Command") !== -1) {
     w.closeWindow();
   }
@@ -78,6 +101,18 @@ JS
         --method org.kde.kwin.Scripting.unloadScript lcclose >/dev/null 2>&1
     fi
     rm -f "$TMP"
+
+    AFTER="$(app_window_pids | wc -l)"
+    if [ "$BEFORE" -eq 0 ]; then
+      echo "[close] no Life Command window was open"
+    elif [ "$AFTER" -ge "$BEFORE" ]; then
+      # The window survived: the class match is wrong again, or KWin scripting
+      # is unavailable. Say so rather than pretending the close worked.
+      echo "[close] WARNING: $BEFORE window process(es) still present — nothing matched." >&2
+      notify "Could not close the window" "Re-run scripts/install-desktop.sh; the window class may have changed"
+    else
+      echo "[close] closed Life Command window(s)"
+    fi
     ;;
   stop)
     systemctl --user stop finance-web finance-workers finance-supabase
