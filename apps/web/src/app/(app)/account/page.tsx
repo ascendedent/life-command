@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { KeyRound, Mail, ShieldCheck, TimerReset, UserRound } from "lucide-react";
+import { CalendarClock, KeyRound, Mail, ShieldCheck, TimerReset, UserRound } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +42,9 @@ export default function AccountPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [lockMinutes, setLockMinutes] = useState<number | null>(null);
+  const [incomeMode, setIncomeMode] = useState<string | null>(null);
+  const [incomeDay, setIncomeDay] = useState<number>(26);
+  const [incomeSaved, setIncomeSaved] = useState(false);
   const [lockSaved, setLockSaved] = useState(false);
   const [lockError, setLockError] = useState<string | null>(null);
   const [gmail, setGmail] = useState<
@@ -125,10 +128,14 @@ export default function AccountPage() {
       );
     supabase
       .from("app_settings")
-      .select("auto_lock_minutes")
+      .select("auto_lock_minutes, income_attribution, income_shift_from_day")
       .eq("id", 1)
       .maybeSingle()
-      .then(({ data }) => setLockMinutes(data?.auto_lock_minutes ?? 0));
+      .then(({ data }) => {
+        setLockMinutes(data?.auto_lock_minutes ?? 0);
+        setIncomeMode(data?.income_attribution ?? "calendar");
+        setIncomeDay(data?.income_shift_from_day ?? 26);
+      });
   }, []);
 
   async function handleLockChange(minutes: number) {
@@ -150,6 +157,27 @@ export default function AccountPage() {
       detail: { auto_lock_minutes: minutes },
     });
     setLockSaved(true);
+  }
+
+  async function handleIncomeChange(mode: string, day: number) {
+    setIncomeMode(mode);
+    setIncomeDay(day);
+    setIncomeSaved(false);
+    const supabase = createClient();
+    const { error } = await supabase
+      .from("app_settings")
+      .upsert(
+        { id: 1, income_attribution: mode, income_shift_from_day: day },
+        { onConflict: "id" }
+      );
+    if (error) return;
+    await supabase.from("audit_log").insert({
+      actor: "user",
+      action: "income_attribution_changed",
+      entity: "app_settings",
+      detail: { income_attribution: mode, income_shift_from_day: day },
+    });
+    setIncomeSaved(true);
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -292,6 +320,58 @@ export default function AccountPage() {
               {busy ? "Updating…" : "Update password"}
             </Button>
           </form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-1.5">
+            <CalendarClock className="h-3.5 w-3.5" /> Income attribution
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            A paycheque landing on the 30th is usually spent on the month about
+            to start. Counting it in the month it posted inflates that month and
+            leaves the next one looking like it began empty. Expenses are never
+            moved — only income shifts.
+          </p>
+          <div className="flex flex-wrap items-center gap-3">
+            <select
+              value={incomeMode ?? ""}
+              disabled={incomeMode === null}
+              onChange={(e) => handleIncomeChange(e.target.value, incomeDay)}
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              {incomeMode === null && <option value="">loading…</option>}
+              <option value="calendar">Calendar month (matches your statement)</option>
+              <option value="forward_shift">Month-end pay counts toward next month</option>
+            </select>
+            {incomeMode === "forward_shift" && (
+              <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                from day
+                <select
+                  value={incomeDay}
+                  onChange={(e) => handleIncomeChange("forward_shift", Number(e.target.value))}
+                  className="h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  {Array.from({ length: 17 }, (_, i) => 15 + i).map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {incomeSaved && <span className="text-sm text-primary">Saved</span>}
+          </div>
+          {incomeMode === "forward_shift" && (
+            <p className="text-xs text-muted-foreground">
+              Income posted on or after the {incomeDay}
+              {incomeDay === 1 ? "st" : incomeDay === 2 ? "nd" : incomeDay === 3 ? "rd" : "th"} counts
+              toward the following month. A 15th-and-30th schedule then splits the way it is spent.
+            </p>
+          )}
         </CardContent>
       </Card>
 

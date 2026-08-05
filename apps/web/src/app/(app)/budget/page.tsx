@@ -2,6 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+// deep import: the shared index pulls in node-only modules (crypto, plaid)
+import {
+  attributionFrom,
+  attributionMonthOf,
+  incomeWindowFor,
+  isShiftableIncome,
+  CALENDAR_ATTRIBUTION,
+} from "@finance/shared/src/pay-period";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,6 +51,21 @@ export default function BudgetPage() {
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
+  const [attribution, setAttribution] = useState(CALENDAR_ATTRIBUTION);
+
+  // The rows the page needs: the calendar month for spending, widened to cover
+  // wherever this month's income may have landed.
+  const { queryFrom, queryTo } = useMemo(() => {
+    const key = month.slice(0, 7);
+    const w = incomeWindowFor(key, attribution);
+    const [y, m] = key.split("-").map(Number);
+    const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return {
+      queryFrom: w.from < month ? w.from : month,
+      queryTo: w.to > `${key}-${lastDay}` ? w.to : `${key}-${String(lastDay).padStart(2, "0")}`,
+    };
+  }, [month, attribution]);
+
   const nextMonth = useMemo(() => {
     const d = new Date(`${month}T00:00:00Z`);
     d.setUTCMonth(d.getUTCMonth() + 1);
@@ -51,7 +74,8 @@ export default function BudgetPage() {
 
   const load = useCallback(async () => {
     setLoaded(false);
-    const [{ data: catRows }, { data: budget }, { data: txns }] = await Promise.all([
+    const [{ data: catRows }, { data: budget }, { data: txns }, { data: settingsRow }] =
+      await Promise.all([
       supabase
         .from("categories")
         .select(
@@ -65,13 +89,21 @@ export default function BudgetPage() {
         .maybeSingle(),
       supabase
         .from("transactions")
-        .select("category_id, amount")
-        .gte("date", month)
-        .lt("date", nextMonth)
+        .select("category_id, amount, date")
+        // Widened to cover the income window, which under forward_shift reaches
+        // into the tail of last month and stops before the tail of this one.
+        // Each row is then attributed individually below.
+        .gte("date", queryFrom)
+        .lte("date", queryTo)
         // hidden=false is the whole story: splitting hides the parent and
         // creates children, so this counts each dollar exactly once. Filtering
         // on parent_transaction_id as well would drop every split.
         .eq("hidden", false),
+      supabase
+        .from("app_settings")
+        .select("income_attribution, income_shift_from_day")
+        .eq("id", 1)
+        .maybeSingle(),
     ]);
 
     setCats(
@@ -95,18 +127,34 @@ export default function BudgetPage() {
     setStyle((budget?.style as "category" | "flex") ?? "category");
     setLines((budget?.budget_lines ?? []) as Line[]);
 
+    // Expenses belong to the month they happened in. Income belongs to the
+    // month it is meant to cover, which for a month-end paycheque is the next
+    // one — see attributionMonthOf.
+    const cfg = attributionFrom(settingsRow ?? null);
+    // Refunds and interest keep their calendar month even under forward_shift.
+    const catName = new Map((catRows ?? []).map((c: any) => [c.id as string, c.name as string]));
     const s = new Map<string, number>();
     const inc = new Map<string, number>();
     for (const t of txns ?? []) {
       if (!t.category_id) continue;
       const amt = Number(t.amount);
-      if (amt > 0) s.set(t.category_id, (s.get(t.category_id) ?? 0) + amt);
-      else inc.set(t.category_id, (inc.get(t.category_id) ?? 0) - amt);
+      const date = String(t.date);
+      if (amt > 0) {
+        if (date >= month && date < nextMonth) {
+          s.set(t.category_id, (s.get(t.category_id) ?? 0) + amt);
+        }
+      } else if (
+        attributionMonthOf(date, isShiftableIncome(catName.get(t.category_id)), cfg) ===
+        month.slice(0, 7)
+      ) {
+        inc.set(t.category_id, (inc.get(t.category_id) ?? 0) - amt);
+      }
     }
+    setAttribution(cfg);
     setSpent(s);
     setIncome(inc);
     setLoaded(true);
-  }, [supabase, month, nextMonth]);
+  }, [supabase, month, nextMonth, queryFrom, queryTo]);
 
   useEffect(() => {
     load();
