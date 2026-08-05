@@ -22,6 +22,7 @@ const { pollGmail, expireAnticipations } = await import("./workers/gmail.js");
 const { matchGoalContributions } = await import("./workers/goals.js");
 const { runEnrichment } = await import("./workers/enrich.js");
 const { runRecap } = await import("./workers/recap.js");
+const { detectCardPayments } = await import("./workers/card-payments.js");
 
 const db = createServiceClient();
 const plaid = createPlaidClient();
@@ -71,6 +72,7 @@ cron.schedule("0 0 2 * * *", async () => {
     await snapshotNetWorth(db);
     await expireAnticipations(db);
     await matchGoalContributions(db);
+    await detectCardPayments(db, { apply: true, sinceDays: 60 });
   } catch (e: unknown) {
     console.error("[daily] failed:", (e as Error).message);
   }
