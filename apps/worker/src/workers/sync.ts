@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PlaidApi, Transaction as PlaidTxn } from "plaid";
 import {
   audit,
+  plaidError,
   decryptSecret,
   categorizeTransaction,
   merchantKey,
@@ -18,6 +19,19 @@ interface InstitutionRow {
   access_token_enc: string;
   transactions_cursor: string | null;
 }
+
+/**
+ * Plaid errors that mean "ask again shortly", not "this link is broken".
+ * PRODUCT_NOT_READY is the common one: it is what a brand-new Item returns
+ * while Plaid is still pulling history, so it fires on nearly every first sync.
+ */
+const TRANSIENT_PLAID_ERRORS = new Set([
+  "PRODUCT_NOT_READY",
+  "RATE_LIMIT_EXCEEDED",
+  "INTERNAL_SERVER_ERROR",
+  "PLANNED_MAINTENANCE",
+]);
+const MAX_TRANSIENT_RETRIES = 6;
 
 interface AccountRow {
   id: string;
@@ -280,7 +294,8 @@ async function syncInstitution(
         });
       }
     } catch (e: unknown) {
-      console.error(`[sync] liabilities for ${inst.name}:`, (e as Error).message);
+      // Non-fatal: not every issuer exposes liabilities for every Item.
+      console.error(`[sync] liabilities for ${inst.name}: ${plaidError(e).summary}`);
     }
   }
 
@@ -322,13 +337,54 @@ export async function runSync(
       );
       await audit(db, "system", "sync_completed", "institutions", inst.id, counts);
     } catch (e: unknown) {
-      const msg = (e as Error).message;
-      console.error(`[sync] ${inst.name} failed:`, msg);
+      const p = plaidError(e);
+
+      // Plaid is still preparing the Item — the normal answer for the first
+      // few minutes after linking. Back off and retry rather than declaring
+      // the institution broken; the link itself is fine.
+      if (p.error_code && TRANSIENT_PLAID_ERRORS.has(p.error_code)) {
+        const { count } = await db
+          .from("sync_jobs")
+          .select("id", { count: "exact", head: true })
+          .eq("institution_id", inst.id)
+          .eq("requested_by", "system")
+          .gte("requested_at", new Date(Date.now() - 3600_000).toISOString());
+        const attempt = count ?? 0;
+
+        if (attempt < MAX_TRANSIENT_RETRIES) {
+          const delaySec = Math.min(60 * 2 ** attempt, 900); // 1min → 15min
+          await db.from("sync_jobs").insert({
+            type: "sync_item",
+            institution_id: inst.id,
+            requested_by: "system",
+            attempts: attempt + 1,
+            run_after: new Date(Date.now() + delaySec * 1000).toISOString(),
+          });
+          await db
+            .from("institutions")
+            .update({ status: "syncing", last_error: `${p.error_code} — retrying` })
+            .eq("id", inst.id);
+          console.log(
+            `[sync] ${inst.name}: ${p.error_code}, retrying in ${delaySec}s (attempt ${attempt + 1}/${MAX_TRANSIENT_RETRIES})`
+          );
+          continue;
+        }
+      }
+
+      console.error(
+        `[sync] ${inst.name} failed: ${p.summary}` +
+          (p.request_id ? ` (request_id ${p.request_id})` : "")
+      );
       await db
         .from("institutions")
-        .update({ status: "error", last_error: msg })
+        .update({ status: "error", last_error: p.summary })
         .eq("id", inst.id);
-      await audit(db, "system", "sync_failed", "institutions", inst.id, { error: msg });
+      await audit(db, "system", "sync_failed", "institutions", inst.id, {
+        error: p.summary,
+        error_code: p.error_code,
+        error_type: p.error_type,
+        request_id: p.request_id,
+      });
     }
   }
   await snapshotNetWorth(db);
@@ -340,6 +396,8 @@ export async function pollSyncJobs(db: SupabaseClient, plaid: PlaidApi): Promise
     .from("sync_jobs")
     .select("id, type, institution_id")
     .eq("status", "pending")
+    // Honour backoff: a retry queued for later must not be claimed now.
+    .or(`run_after.is.null,run_after.lte.${new Date().toISOString()}`)
     .order("requested_at")
     .limit(1)
     .maybeSingle();
