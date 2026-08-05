@@ -359,6 +359,9 @@ async function writeGoalCosts(db: SupabaseClient, facts: Stage1Facts, runId: str
         run_id: runId,
         cost_type: cost.cost_type,
         amount: cost.amount,
+        // Without this the row names the card only in prose, so the cost can
+        // never be joined back to the liability it came from.
+        liability_id: cost.liability_id,
         contributing_txn_ids: cost.contributing_txn_ids,
         computation: cost.computation,
         narrative: cost.narrative,

@@ -4,5 +4,6 @@ export * from "./crypto";
 export * from "./plaid";
 export * from "./pfc-map";
 export * from "./categorize";
+export * from "./budget";
 export * from "./receipt-items";
 export * from "./receipt-split";

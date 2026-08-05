@@ -125,6 +125,8 @@ export interface GoalCostFact {
   costs: {
     cost_type: string;
     amount: number;
+    /** The cost driver this was charged against, so the row is traceable. */
+    liability_id: string | null;
     liability_last4: string | null;
     computation: InterestComputation | Record<string, unknown>;
     narrative: string;
@@ -340,6 +342,7 @@ export function computeGoalCosts(input: GoalCostInput): GoalCostFact {
       costs.push({
         cost_type: "interest_accrued",
         amount: computation.interest,
+        liability_id: d.liability_id,
         liability_last4: d.account_last4,
         computation,
         narrative: `Carried ${computation.balance} on the card ending ${

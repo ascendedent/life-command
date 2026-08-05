@@ -24,6 +24,11 @@ export async function PATCH(
 
   // Business default stamps every txn on the account (spec §1.6): apply to
   // already-synced history too, but never overwrite user-set business flags.
+  //
+  // `business_source` is NULL on every ordinary transaction, and `neq` never
+  // matches NULL — so the backfill matched nothing and flagging an account did
+  // precisely nothing to the history it was meant to claim. Spell out the
+  // sources we may overwrite, the same way the enrichment pass has to.
   if (patch.is_business === true) {
     await supabase
       .from("transactions")
@@ -34,7 +39,7 @@ export async function PATCH(
         receipt_status: "requested",
       })
       .eq("account_id", params.id)
-      .neq("business_source", "user");
+      .or("business_source.is.null,business_source.eq.account_default");
   } else if (patch.is_business === false) {
     await supabase
       .from("transactions")

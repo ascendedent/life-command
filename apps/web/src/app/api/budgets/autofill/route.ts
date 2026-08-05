@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/api-auth";
+import { planBudgetLines } from "@finance/shared";
 
 // Creates (or refills) a month's budget from trailing 6-month category
 // averages (spec §1.6 Monarch parity). Also computes rollover_in for
@@ -44,16 +45,6 @@ export async function POST(request: Request) {
     ])
   );
 
-  // trailing average of actuals per category (outflows for expense, inflows for income)
-  const sums = new Map<string, number>();
-  for (const t of txns ?? []) {
-    if (!t.category_id || !catType.has(t.category_id)) continue;
-    const type = catType.get(t.category_id)!;
-    const amt = Number(t.amount);
-    const contrib = type === "income" ? -amt : amt; // plaid: inflow negative
-    if (contrib > 0) sums.set(t.category_id, (sums.get(t.category_id) ?? 0) + contrib);
-  }
-
   const { data: budget, error: bErr } = await supabase
     .from("budgets")
     .upsert({ month, style: body.style ?? "category" }, { onConflict: "month" })
@@ -88,26 +79,19 @@ export async function POST(request: Request) {
   }
 
   await supabase.from("budget_lines").delete().eq("budget_id", budget.id);
-  const lines = budgetable.map((c) => {
-    const avg = Math.round(((sums.get(c.id) ?? 0) / 6) * 100) / 100;
-    let rolloverIn = 0;
-    if (c.is_rollover && prevBudget) {
-      const prevLine = (prevBudget.budget_lines as { category_id: string | null; amount: number; rollover_in: number }[] | null)
-        ?.find((l) => l.category_id === c.id);
-      if (prevLine) {
-        rolloverIn = Math.max(
-          0,
-          Number(prevLine.amount) + Number(prevLine.rollover_in) - (prevSpend.get(c.id) ?? 0)
-        );
-      }
-    }
-    return {
-      budget_id: budget.id,
-      category_id: c.id,
-      amount: avg,
-      rollover_in: Math.round(rolloverIn * 100) / 100,
-    };
-  });
+  const lines = planBudgetLines({
+    categories: budgetable.map((c) => ({
+      id: c.id,
+      is_rollover: c.is_rollover,
+      type: catType.get(c.id) ?? "expense",
+    })),
+    history: (txns ?? []).map((t) => ({ category_id: t.category_id, amount: Number(t.amount) })),
+    priorLines:
+      (prevBudget?.budget_lines as
+        | { category_id: string | null; amount: number; rollover_in: number }[]
+        | null) ?? null,
+    priorSpend: prevSpend,
+  }).map((l) => ({ ...l, budget_id: budget.id }));
   const { error: lErr } = await supabase.from("budget_lines").insert(lines);
   if (lErr) return NextResponse.json({ error: lErr.message }, { status: 500 });
 
