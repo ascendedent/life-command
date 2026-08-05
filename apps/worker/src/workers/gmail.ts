@@ -110,6 +110,11 @@ function decodeBody(payload: Record<string, unknown>): string {
   return parts
     .join("\n")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    // Retailers render line items as images, so the product names live only in
+    // alt/title attributes. Stripping tags first threw them away: a Walmart
+    // order reduced to "Order total $35.60 5 items", with nothing to
+    // categorise. Surface that text before the tags go.
+    .replace(/<(?:img|area)\b[^>]*?\b(?:alt|title)=["']([^"']+)["'][^>]*>/gi, " $1 ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;|&amp;|&#\d+;/g, " ")
     .replace(/\s+/g, " ")

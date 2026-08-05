@@ -92,6 +92,9 @@ function txnRow(
     date: t.date,
     amount: t.amount,
     merchant: t.merchant_name ?? t.name,
+    // Keep the bank descriptor even when a tidy merchant_name exists — it is
+    // what disambiguates "Walmart" the payment from "Walmart" the groceries.
+    description: t.name,
     merchant_clean: cat.merchant_clean,
     category_id: cat.category_id,
     category_source: cat.category_source,

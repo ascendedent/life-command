@@ -92,7 +92,7 @@ export default function TransactionsPage() {
     let q = supabase
       .from("transactions")
       .select(
-        "id, account_id, date, amount, merchant, merchant_clean, category_id, category_source, pending, hidden, needs_review, is_business, business_entity, receipt_status, parent_transaction_id, accounts (name)",
+        "id, account_id, date, amount, merchant, merchant_clean, description, category_id, category_source, pending, hidden, needs_review, is_business, business_entity, receipt_status, parent_transaction_id, accounts (name)",
         { count: "exact" }
       )
       .order("date", { ascending: false })
@@ -104,7 +104,12 @@ export default function TransactionsPage() {
     else if (tab === "hidden") q = q.eq("hidden", true);
     else q = q.eq("hidden", false);
 
-    if (search) q = q.or(`merchant.ilike.%${search}%,merchant_clean.ilike.%${search}%`);
+    // Search the bank descriptor too — often the only place the identifying
+    // text lives ("WEB PMTS", a payee reference, a store number).
+    if (search)
+      q = q.or(
+        `merchant.ilike.%${search}%,merchant_clean.ilike.%${search}%,description.ilike.%${search}%`
+      );
     if (accountFilter) q = q.eq("account_id", accountFilter);
     if (categoryFilter) q = q.eq("category_id", categoryFilter);
     if (dateFrom) q = q.gte("date", dateFrom);
@@ -403,6 +408,15 @@ export default function TransactionsPage() {
                     </td>
                     <td className="max-w-56 px-3 py-1.5">
                       <span className="block truncate">{t.merchant_clean ?? t.merchant}</span>
+                      {/* The bank's own descriptor: what makes an ambiguous
+                          merchant identifiable, e.g. "Walmart" vs
+                          "Northgate Realty WEB PMTS 7X4K2P". Hidden when it
+                          adds nothing. */}
+                      {t.description && t.description !== (t.merchant_clean ?? t.merchant) && (
+                        <span className="block truncate font-mono text-[10px] leading-tight text-muted-foreground">
+                          {t.description}
+                        </span>
+                      )}
                       <span className="flex gap-1">
                         {t.pending && <Badge variant="secondary">pending</Badge>}
                         {t.needs_review && <Badge variant="warning">review</Badge>}

@@ -5,6 +5,7 @@ export interface TxnRow {
   amount: number;
   merchant: string | null;
   merchant_clean: string | null;
+  description: string | null;
   category_id: string | null;
   category_source: string | null;
   pending: boolean;
