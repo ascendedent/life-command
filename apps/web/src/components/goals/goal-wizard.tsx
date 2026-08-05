@@ -6,7 +6,7 @@ import { AlertTriangle, ArrowLeft, ArrowRight, Check, Loader2 } from "lucide-rea
 import {
   GOAL_TYPES,
   dedupeMatches,
-  interestAccrued,
+  projectInterest,
   matchContributions,
   netEfficiency,
   type ContributionMatch,
@@ -174,9 +174,9 @@ export function GoalWizard({
       .map((l) => {
         const liab = refs.liabilities.find((x) => x.id === l.entity_id);
         if (!liab?.balance || !liab.apr) return null;
-        return { name: liab.account_name, ...interestAccrued(Number(liab.balance), Number(liab.apr), days) };
+        return { name: liab.account_name, ...projectInterest(Number(liab.balance), Number(liab.apr), days) };
       })
-      .filter(Boolean) as ({ name: string } & ReturnType<typeof interestAccrued>)[];
+      .filter(Boolean) as ({ name: string } & ReturnType<typeof projectInterest>)[];
 
     const recurringCosts = links
       .filter((l) => l.role === "cost_driver" && l.entity_type === "recurring_item")

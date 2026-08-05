@@ -265,11 +265,21 @@ async function syncInstitution(
       for (const c of liab.data.liabilities.credit ?? []) {
         const account = c.account_id ? accountsByPlaidId.get(c.account_id) : null;
         if (!account) continue;
+        // Every rate, not just one. A 0% promotional APR and a 26.99% cash
+        // advance rate were both being discarded, and the promotional one is
+        // what decides whether carrying a balance costs anything at all.
+        const aprs = (c.aprs ?? []).map((x) => ({
+          apr_type: String(x.apr_type),
+          apr_percentage: x.apr_percentage ?? null,
+          balance_subject_to_apr: x.balance_subject_to_apr ?? null,
+          interest_charge_amount: x.interest_charge_amount ?? null,
+        }));
         const apr = c.aprs?.find((x) => x.apr_type === "purchase_apr") ?? c.aprs?.[0];
         seen.push({ account_id: account.id, type: "credit" });
         await db.from("liabilities").upsert({
           account_id: account.id,
           type: "credit",
+          aprs,
           apr: apr?.apr_percentage ?? null,
           minimum_payment: c.minimum_payment_amount ?? null,
           next_due_date: c.next_payment_due_date ?? null,

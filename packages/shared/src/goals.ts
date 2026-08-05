@@ -298,7 +298,7 @@ export function netEfficiency(contributed: number, costs: number[]): NetEfficien
   };
 }
 
-export interface InterestComputation {
+export interface InterestProjection {
   balance: number;
   apr_percent: number;
   days: number;
@@ -308,14 +308,20 @@ export interface InterestComputation {
 }
 
 /**
- * Simple daily-periodic-rate interest, the method US card issuers actually use
- * for a carried balance. `apr` is a percentage (19.99), matching what Plaid
- * stores in `liabilities.apr`.
+ * What carrying this balance *would* cost, by the daily-periodic-rate method US
+ * issuers use. `apr` is a percentage (19.99), matching `liabilities.apr`.
  *
- * The whole computation is returned, not just the number: `goal_costs` stores
- * it so every dollar of attributed cost can be re-derived by hand.
+ * A projection, never a record of what happened — the name says so because the
+ * old one ("interestAccrued") read like an observation and was used as one. It
+ * reported $27.40 of interest for a month on a card that was paid in full and
+ * charged nothing, because a formula over balance and APR cannot see a grace
+ * period. Only the statement knows what was charged.
+ *
+ * Legitimate uses: showing the owner what revolving a balance would cost them,
+ * and comparing that against paying it down. Never for recording a cost that
+ * has already been incurred — read the interest charges for that.
  */
-export function interestAccrued(balance: number, apr: number, days: number): InterestComputation {
+export function projectInterest(balance: number, apr: number, days: number): InterestProjection {
   const dailyRate = apr / 100 / 365;
   const interest = round2(balance * dailyRate * days);
   return {

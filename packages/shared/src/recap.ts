@@ -8,7 +8,7 @@
 
 import { round2, type CategoryIndex, type ReportTxn } from "./reports";
 import { summarize } from "./reports";
-import { interestAccrued, type InterestComputation } from "./goals";
+import { type InterestProjection } from "./goals";
 
 // ---------------------------------------------------------------------------
 // period windows
@@ -128,7 +128,7 @@ export interface GoalCostFact {
     /** The cost driver this was charged against, so the row is traceable. */
     liability_id: string | null;
     liability_last4: string | null;
-    computation: InterestComputation | Record<string, unknown>;
+    computation: InterestProjection | Record<string, unknown>;
     narrative: string;
     contributing_txn_ids: string[];
   }[];
