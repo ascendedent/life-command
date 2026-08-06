@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CalendarClock, KeyRound, Mail, ShieldCheck, TimerReset, UserRound } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { AuthenticatorDevices } from "@/components/account/authenticator-devices";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -322,6 +323,8 @@ export default function AccountPage() {
           </form>
         </CardContent>
       </Card>
+
+      <AuthenticatorDevices />
 
       <Card>
         <CardHeader>
