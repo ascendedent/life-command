@@ -10,7 +10,13 @@ WorkingDirectory=@ROOT@
 Environment=PATH=@NODE_DIR@:/usr/local/bin:/usr/bin:/bin
 # Docker is a system service the user manager can't order against — wait for it.
 ExecStartPre=/usr/bin/bash -c 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; echo "docker never came up"; exit 1'
-ExecStart=/usr/bin/bash -c 'cd "@ROOT@" && npx supabase start'
+# Docker restores the Supabase containers itself at boot (they carry
+# restart=unless-stopped), so by the time this runs the stack is usually
+# already up and `supabase start` races its own lock: at the first real reboot
+# it exited 1 with "supabase start is already running", the unit was marked
+# failed, and ExecStartPost never ran — so the env sync silently did not
+# happen even though the database was fine. Ask first, start only if needed.
+ExecStart=/usr/bin/bash -c 'cd "@ROOT@" && { npx supabase status >/dev/null 2>&1 || npx supabase start; }'
 ExecStartPost=/usr/bin/bash -c 'cd "@ROOT@" && node scripts/sync-env.mjs'
 ExecStop=/usr/bin/bash -c 'cd "@ROOT@" && npx supabase stop'
 
