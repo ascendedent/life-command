@@ -540,6 +540,21 @@ Each phase ships independently and is fully usable before the next begins. Do no
 - Weekly agent performance report: what it did, outcomes, vs baseline of doing nothing
 - **Accept:** one full week of bounded autonomy on small caps with correct notifications, then deliberately trip each circuit breaker in a test and confirm halts.
 
+### Phase 2.1: Drill-down (small, continuous)
+
+Refinements that only became obvious once the platform ran on real data. Each
+is small enough to land without a phase of its own.
+
+- **Budget line drill-down.** Clicking a budget category opens the transactions
+  behind that figure, for that month, without leaving the page. A budget number
+  is an assertion — "you spent $820 on Shopping" — and the only way to trust or
+  correct it is to see what it is made of. Every miscategorisation found so far
+  was found by asking that question, and until now answering it meant going to
+  Transactions and rebuilding the same filters by hand. The panel counts each
+  dollar exactly once the way the budget does (a split hides its parent, so
+  `hidden = false` alone), and offers the same query as a Transactions link for
+  when editing is what is actually wanted.
+
 ### Phase 5 (later, optional)
 
 - **Hosted migration:** promote to hosted Supabase + Vercel + Render when the owner wants access away from the machine. Same migrations, swap env values, enable Plaid webhooks, move secrets to Vault. The local build's structure makes this a config exercise, not a rewrite.

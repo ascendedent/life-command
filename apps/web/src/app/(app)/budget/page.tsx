@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { CategoryTransactions } from "@/components/budget/category-transactions";
 // deep import: the shared index pulls in node-only modules (crypto, plaid)
 import {
   attributionFrom,
@@ -52,6 +53,8 @@ export default function BudgetPage() {
   const [loaded, setLoaded] = useState(false);
 
   const [attribution, setAttribution] = useState(CALENDAR_ATTRIBUTION);
+  // Which budget line the owner opened to see what it is made of.
+  const [drillCat, setDrillCat] = useState<{ id: string; name: string; spent: number } | null>(null);
 
   // The rows the page needs: the calendar month for spending, widened to cover
   // wherever this month's income may have landed.
@@ -371,14 +374,21 @@ export default function BudgetPage() {
                         const over = catSpent > budgeted && budgeted > 0;
                         return (
                           <div key={c.id} className="flex items-center gap-3">
-                            <span className="w-44 truncate text-sm">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDrillCat({ id: c.id, name: `${c.emoji ?? ""} ${c.name}`.trim(), spent: catSpent })
+                              }
+                              title="Show the transactions behind this figure"
+                              className="w-44 truncate text-left text-sm underline-offset-4 hover:underline"
+                            >
                               {c.emoji} {c.name}
                               {Number(line?.rollover_in ?? 0) > 0 && (
                                 <Badge variant="secondary" className="ml-1.5">
                                   +{fmt(Number(line!.rollover_in))} carried
                                 </Badge>
                               )}
-                            </span>
+                            </button>
                             <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-muted">
                               <div
                                 className={cn("h-full rounded-full", over ? "bg-destructive" : "bg-primary/70")}
@@ -390,9 +400,19 @@ export default function BudgetPage() {
                                 title="month elapsed"
                               />
                             </div>
-                            <span className={cn("w-20 text-right font-mono text-xs", over && "text-destructive")}>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDrillCat({ id: c.id, name: `${c.emoji ?? ""} ${c.name}`.trim(), spent: catSpent })
+                              }
+                              title="Show the transactions behind this figure"
+                              className={cn(
+                                "w-20 text-right font-mono text-xs underline-offset-4 hover:underline",
+                                over && "text-destructive"
+                              )}
+                            >
                               {fmt(catSpent)}
-                            </span>
+                            </button>
                             {line ? (
                               <AmountInput line={line} onSave={saveAmount} />
                             ) : (
@@ -428,6 +448,17 @@ export default function BudgetPage() {
             </div>
           )}
         </>
+      )}
+
+      {drillCat && (
+        <CategoryTransactions
+          categoryId={drillCat.id}
+          categoryName={drillCat.name}
+          monthStart={month}
+          monthEnd={nextMonth}
+          expected={drillCat.spent}
+          onClose={() => setDrillCat(null)}
+        />
       )}
     </div>
   );

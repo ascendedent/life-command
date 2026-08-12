@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 // deep import: the shared index pulls in node-only modules (crypto, plaid)
 import { merchantKey, isMixedBasket } from "@finance/shared/src/categorize";
@@ -52,12 +53,15 @@ export default function TransactionsPage() {
   const [splitTxn, setSplitTxn] = useState<TxnRow | null>(null);
   const [newTag, setNewTag] = useState("");
 
-  // filters
+  // filters — seeded from the URL so a link can arrive pre-filtered. The budget
+  // drill-down hands off with ?category=&from=&to=, and a link that lands on an
+  // unfiltered list is worse than no link: it looks like the answer.
+  const params = useSearchParams();
   const [search, setSearch] = useState("");
-  const [accountFilter, setAccountFilter] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [accountFilter, setAccountFilter] = useState(params.get("account") ?? "");
+  const [categoryFilter, setCategoryFilter] = useState(params.get("category") ?? "");
+  const [dateFrom, setDateFrom] = useState(params.get("from") ?? "");
+  const [dateTo, setDateTo] = useState(params.get("to") ?? "");
 
   const loadStatic = useCallback(async () => {
     const [{ data: cats }, { data: accts }, { data: ruleRows }, { data: tagRows }] =
