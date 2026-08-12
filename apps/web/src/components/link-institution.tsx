@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import { usePlaidLink } from "react-plaid-link";
 import { Landmark, Loader2, RefreshCw } from "lucide-react";
@@ -52,6 +53,24 @@ export function LinkInstitution({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flagStep, setFlagStep] = useState<LinkedAccount[] | null>(null);
+  const [members, setMembers] = useState<{ id: string; name: string; is_primary: boolean }[]>([]);
+  const [memberId, setMemberId] = useState<string>("");
+
+  // Whose bank is being linked. Only worth asking once the household has more
+  // than one person in it.
+  useEffect(() => {
+    if (institutionId) return; // relink keeps the member it already has
+    createClient()
+      .from("household_members")
+      .select("id, name, is_primary")
+      .order("is_primary", { ascending: false })
+      .order("name")
+      .then(({ data }) => {
+        const rows = data ?? [];
+        setMembers(rows);
+        setMemberId(rows.find((m) => m.is_primary)?.id ?? rows[0]?.id ?? "");
+      });
+  }, [institutionId]);
 
   const start = useCallback(async () => {
     setBusy(true);
@@ -59,7 +78,9 @@ export function LinkInstitution({
     const res = await fetch("/api/plaid/link-token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(institutionId ? { institution_id: institutionId } : {}),
+      body: JSON.stringify(
+        institutionId ? { institution_id: institutionId } : { member_id: memberId || null }
+      ),
     });
     const data = await res.json();
     setBusy(false);
@@ -68,7 +89,7 @@ export function LinkInstitution({
       return;
     }
     setLinkToken(data.link_token);
-  }, [institutionId]);
+  }, [institutionId, memberId]);
 
   const onSuccess = useCallback(
     async (
@@ -87,7 +108,11 @@ export function LinkInstitution({
       const res = await fetch("/api/plaid/exchange", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ public_token: publicToken, institution: metadata.institution }),
+        body: JSON.stringify({
+          public_token: publicToken,
+          institution: metadata.institution,
+          member_id: memberId || null,
+        }),
       });
       const data = await res.json();
       setBusy(false);
@@ -97,7 +122,7 @@ export function LinkInstitution({
       }
       setFlagStep(data.accounts);
     },
-    [institutionId, router]
+    [institutionId, router, memberId]
   );
 
   const { open, ready } = usePlaidLink({
@@ -133,6 +158,24 @@ export function LinkInstitution({
 
   return (
     <div className={compact ? "inline-flex" : "flex flex-col gap-1"}>
+      {/* Plaid starts a clean session per member, so this has to be chosen
+          before the token is issued rather than after the accounts arrive. */}
+      {!institutionId && members.length > 1 && (
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          Linking for
+          <select
+            value={memberId}
+            onChange={(e) => setMemberId(e.target.value)}
+            className="h-7 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <Button
         variant={institutionId ? "outline" : "default"}
         size="sm"

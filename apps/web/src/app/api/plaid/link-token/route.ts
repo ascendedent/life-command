@@ -25,8 +25,18 @@ export async function POST(request: Request) {
       }
     }
 
+    // Plaid keys its returning-user experience off client_user_id: send the
+    // same one every time and Link recognises the owner, offers their saved
+    // institutions, and pre-fills their details — which is exactly wrong when
+    // the person at the keyboard is linking a partner's bank. A member-scoped
+    // id makes each person a separate end user, so Link starts clean for them.
+    // It stays a pair of opaque uuids; no personal detail is sent to Plaid.
+    const endUserId = body.member_id
+      ? `${guard.user.id}:${body.member_id}`
+      : guard.user.id;
+
     const res = await plaid.linkTokenCreate({
-      user: { client_user_id: guard.user.id },
+      user: { client_user_id: endUserId },
       client_name: "Life Command",
       language: "en",
       country_codes: [CountryCode.Us],

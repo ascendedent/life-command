@@ -54,6 +54,10 @@ export async function POST(request: Request) {
           mask: a.mask ?? null,
           current_balance: a.balances.current,
           available_balance: a.balances.available,
+          // Whoever this bank was linked as owns the accounts behind it. Any
+          // of them can be reassigned afterwards — a joint account may belong
+          // to the household rather than to the person who logged in.
+          ...(body.member_id ? { member_id: body.member_id } : {}),
         },
         { onConflict: "plaid_account_id" }
       );
@@ -77,7 +81,11 @@ export async function POST(request: Request) {
       action: "institution_linked",
       entity: "institutions",
       entity_id: inst.id,
-      detail: { name: body.institution?.name, accounts: accounts?.length ?? 0 },
+      detail: {
+        name: body.institution?.name,
+        accounts: accounts?.length ?? 0,
+        member_id: body.member_id ?? null,
+      },
     });
 
     return NextResponse.json({ institution_id: inst.id, accounts: accounts ?? [] });
