@@ -5,6 +5,8 @@ export * from "./plaid";
 export * from "./pfc-map";
 export * from "./categorize";
 export * from "./budget";
+export * from "./alpaca";
+export * from "./guardrails";
 export * from "./pay-period";
 export * from "./receipt-items";
 export * from "./receipt-split";

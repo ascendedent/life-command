@@ -1,0 +1,117 @@
+// Alpaca client, paper by default (spec Phase 3a).
+//
+// Deliberately thin: the executor is the only caller, it passes an order that
+// has already cleared the guardrails, and nothing here decides anything. Keys
+// are read from the environment server-side and never reach the browser.
+
+const PAPER_BASE = "https://paper-api.alpaca.markets";
+const LIVE_BASE = "https://api.alpaca.markets";
+
+export type ExecutionMode = "paper" | "live";
+
+export interface AlpacaOrder {
+  symbol: string;
+  side: "buy" | "sell";
+  /** Dollar-denominated order. Alpaca accepts notional for fractionable stock. */
+  notional?: number;
+  qty?: number;
+  type: "market" | "limit";
+  time_in_force: "day" | "gtc";
+  limit_price?: number;
+  client_order_id?: string;
+}
+
+export interface AlpacaPosition {
+  symbol: string;
+  qty: string;
+  market_value: string;
+  cost_basis: string;
+  unrealized_pl: string;
+}
+
+export interface AlpacaAccount {
+  id: string;
+  status: string;
+  cash: string;
+  equity: string;
+  buying_power: string;
+  pattern_day_trader: boolean;
+}
+
+export class AlpacaError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body: unknown
+  ) {
+    super(message);
+    this.name = "AlpacaError";
+  }
+}
+
+export function alpacaConfigured(): boolean {
+  return !!(process.env.ALPACA_KEY_ID && process.env.ALPACA_SECRET_KEY);
+}
+
+function headers(): Record<string, string> {
+  return {
+    "APCA-API-KEY-ID": process.env.ALPACA_KEY_ID ?? "",
+    "APCA-API-SECRET-KEY": process.env.ALPACA_SECRET_KEY ?? "",
+    "Content-Type": "application/json",
+  };
+}
+
+function baseUrl(mode: ExecutionMode): string {
+  // Live is reachable only when the owner has explicitly switched
+  // agent_config.execution_mode; the default is paper and stays paper.
+  return mode === "live" ? LIVE_BASE : PAPER_BASE;
+}
+
+async function call<T>(
+  mode: ExecutionMode,
+  path: string,
+  init?: RequestInit
+): Promise<T> {
+  const res = await fetch(`${baseUrl(mode)}${path}`, { ...init, headers: headers() });
+  const text = await res.text();
+  let body: unknown = text;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    /* keep the raw text — an HTML error page is worth seeing verbatim */
+  }
+  if (!res.ok) {
+    const message =
+      (body as { message?: string })?.message ?? `Alpaca ${path} failed: HTTP ${res.status}`;
+    throw new AlpacaError(message, res.status, body);
+  }
+  return body as T;
+}
+
+export function getAccount(mode: ExecutionMode): Promise<AlpacaAccount> {
+  return call<AlpacaAccount>(mode, "/v2/account");
+}
+
+export function listPositions(mode: ExecutionMode): Promise<AlpacaPosition[]> {
+  return call<AlpacaPosition[]>(mode, "/v2/positions");
+}
+
+/** Latest trade price, used to value an order before the guardrails see it. */
+export async function lastPrice(mode: ExecutionMode, symbol: string): Promise<number | null> {
+  try {
+    const data = await call<{ trade?: { p?: number } }>(
+      mode,
+      `/v2/stocks/${encodeURIComponent(symbol)}/trades/latest`
+    );
+    return data.trade?.p ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function placeOrder(mode: ExecutionMode, order: AlpacaOrder): Promise<Record<string, unknown>> {
+  return call<Record<string, unknown>>(mode, "/v2/orders", {
+    method: "POST",
+    body: JSON.stringify(order),
+  });
+}
