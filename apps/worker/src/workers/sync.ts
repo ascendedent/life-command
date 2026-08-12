@@ -424,6 +424,39 @@ export async function runSync(
   await snapshotNetWorth(db);
 }
 
+/**
+ * Release jobs a previous process claimed and never finished.
+ *
+ * A job is marked `running` the moment it is claimed, and only the process
+ * that claimed it ever writes the terminal status. Restart the worker
+ * mid-job — a deploy, a reboot, a crash — and that row stays `running`
+ * forever. It does not block the queue, which only ever claims `pending`
+ * rows, but it does mean anything reading job status to decide "is an
+ * analysis in progress" says yes for the rest of time. One had been running
+ * since a restart eight days earlier.
+ *
+ * At boot nothing can legitimately be running: this process owns no jobs
+ * yet, and there is only ever one worker. Anything found running was
+ * abandoned.
+ */
+export async function reapStaleJobs(db: SupabaseClient, olderThanMinutes = 0): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanMinutes * 60_000).toISOString();
+  const { data } = await db
+    .from("sync_jobs")
+    .update({
+      status: "error",
+      finished_at: new Date().toISOString(),
+      error: "interrupted — the worker restarted while this job was running",
+    })
+    .eq("status", "running")
+    .lt("started_at", cutoff)
+    .select("id, type");
+  if (data?.length) {
+    console.log(`[sync] released ${data.length} interrupted job(s): ${data.map((j: any) => j.type).join(", ")}`);
+  }
+  return data?.length ?? 0;
+}
+
 /** Claim and run one pending sync job, if any. Returns true if one ran. */
 export async function pollSyncJobs(db: SupabaseClient, plaid: PlaidApi): Promise<boolean> {
   const { data: job } = await db

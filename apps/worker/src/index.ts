@@ -12,7 +12,7 @@ loadEnv({ path: resolve(repoRoot, ".env") });
 const { default: cron } = await import("node-cron");
 const { createServiceClient, createPlaidClient, audit } = await import("@finance/shared");
 const { beat, markStopped } = await import("./heartbeat.js");
-const { runSync, pollSyncJobs } = await import("./workers/sync.js");
+const { runSync, pollSyncJobs, reapStaleJobs } = await import("./workers/sync.js");
 const { detectRecurring } = await import("./workers/recurring.js");
 const { snapshotNetWorth } = await import("./workers/networth.js");
 const { startSiWatcher } = await import("./workers/si-watch.js");
@@ -29,6 +29,10 @@ const plaid = createPlaidClient();
 const WORKERS = ["sync", "agent", "executor"] as const;
 
 console.log("[worker] finance workers starting (phase 1)");
+
+// Nothing can legitimately be running yet — this process has claimed nothing.
+// Anything still marked running was abandoned by a previous process.
+await reapStaleJobs(db);
 
 await beat(db, "sync", "ok", { note: "phase 1 sync live", booted: true });
 await beat(db, "agent", "stub", { note: "phase 2", booted: true });
@@ -73,6 +77,8 @@ cron.schedule("0 0 2 * * *", async () => {
     await expireAnticipations(db);
     await matchGoalContributions(db);
     await detectCardPayments(db, { apply: true, sinceDays: 60 });
+    // Backstop for a job that somehow outlived its process without a restart.
+    await reapStaleJobs(db, 120);
   } catch (e: unknown) {
     console.error("[daily] failed:", (e as Error).message);
   }

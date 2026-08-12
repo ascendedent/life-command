@@ -4,6 +4,7 @@ import { Terminal } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { SidebarNav } from "@/components/sidebar";
 import { LogoutButton } from "@/components/logout-button";
+import { ActiveJobsIndicator } from "@/components/active-jobs-indicator";
 import { AutoLockTicker } from "@/components/auto-lock-ticker";
 
 export default async function AppLayout({
@@ -58,6 +59,9 @@ export default async function AppLayout({
           <SidebarNav />
         </div>
         <div className="border-t p-2">
+          <div className="mb-1.5 empty:mb-0">
+            <ActiveJobsIndicator />
+          </div>
           <Link
             href="/account"
             className="block truncate rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-accent/50 hover:text-foreground"

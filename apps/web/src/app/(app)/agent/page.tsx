@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Play, ShieldAlert, Sparkles } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { useActiveJobs } from "@/lib/use-active-jobs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -41,8 +42,11 @@ export default function AgentPage() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [breakers, setBreakers] = useState<{ id: string; at: string; rule: string }[]>([]);
-  const [running, setRunning] = useState(false);
-  const [enriching, setEnriching] = useState(false);
+  // In-flight state belongs to the worker, not to this page — read it from
+  // the job queue so it survives navigation and is shared with every tab.
+  const { isRunning, refresh: refreshJobs } = useActiveJobs();
+  const running = isRunning("agent_run");
+  const enriching = isRunning("enrich");
 
   const load = useCallback(async () => {
     const [{ data: cfg }, { data: runRows }, { data: cb }] = await Promise.all([
@@ -58,6 +62,16 @@ export default function AgentPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // The runs table and recommendations are stale the moment a job finishes.
+  // The old code refreshed them from the per-click poller; now that the poller
+  // is shared, refresh on the transition out of "busy" instead.
+  const wasBusy = useRef(false);
+  useEffect(() => {
+    const busy = running || enriching;
+    if (wasBusy.current && !busy) load();
+    wasBusy.current = busy;
+  }, [running, enriching, load]);
 
   async function setLevel(level: number) {
     await supabase.from("agent_config").update({ autonomy_level: level }).eq("id", 1);
@@ -81,29 +95,21 @@ export default function AgentPage() {
     load();
   }
 
-  async function queueJob(type: "agent_run" | "enrich", done: (v: boolean) => void) {
-    done(true);
-    const { data: job } = await supabase
-      .from("sync_jobs")
-      .insert({ type, requested_by: "user" })
-      .select("id")
-      .single();
-    if (!job) {
-      done(false);
-      return;
-    }
-    const poll = setInterval(async () => {
-      const { data } = await supabase.from("sync_jobs").select("status").eq("id", job.id).single();
-      if (data?.status === "done" || data?.status === "error") {
-        clearInterval(poll);
-        done(false);
-        load();
-      }
-    }, 3000);
+  /**
+   * Queue the job and stop caring what happens next.
+   *
+   * The worker owns the work; this page only reports it. The previous version
+   * held the in-flight flag in React state and polled with a setInterval, so
+   * navigating away discarded both — the run continued in the worker while the
+   * UI forgot it existed, and coming back showed an idle button.
+   */
+  async function queueJob(type: "agent_run" | "enrich") {
+    await supabase.from("sync_jobs").insert({ type, requested_by: "user" });
+    await refreshJobs();
   }
 
-  const runNow = () => queueJob("agent_run", setRunning);
-  const enrichNow = () => queueJob("enrich", setEnriching);
+  const runNow = () => queueJob("agent_run");
+  const enrichNow = () => queueJob("enrich");
 
   return (
     <div className="space-y-6">
