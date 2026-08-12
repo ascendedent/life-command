@@ -53,6 +53,9 @@ export function LinkInstitution({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flagStep, setFlagStep] = useState<LinkedAccount[] | null>(null);
+  const [duplicates, setDuplicates] = useState<
+    { name: string; mask: string | null; already_under: string }[]
+  >([]);
   const [members, setMembers] = useState<{ id: string; name: string; is_primary: boolean }[]>([]);
   const [memberId, setMemberId] = useState<string>("");
 
@@ -120,6 +123,7 @@ export function LinkInstitution({
         setError(data.error ?? "Exchange failed");
         return;
       }
+      setDuplicates(data.duplicates ?? []);
       setFlagStep(data.accounts);
     },
     [institutionId, router, memberId]
@@ -148,8 +152,10 @@ export function LinkInstitution({
     return (
       <BusinessFlagDialog
         accounts={flagStep}
+        duplicates={duplicates}
         onDone={() => {
           setFlagStep(null);
+          setDuplicates([]);
           router.refresh();
         }}
       />
@@ -198,9 +204,11 @@ export function LinkInstitution({
 
 function BusinessFlagDialog({
   accounts,
+  duplicates = [],
   onDone,
 }: {
   accounts: LinkedAccount[];
+  duplicates?: { name: string; mask: string | null; already_under: string }[];
   onDone: () => void;
 }) {
   const [rows, setRows] = useState(accounts);
@@ -237,6 +245,26 @@ function BusinessFlagDialog({
           Flag any business accounts — every transaction they sync will
           auto-tag as business and request a receipt. Initial sync is queued.
         </p>
+        {duplicates.length > 0 && (
+          <div className="mt-3 rounded-md border border-warning/50 bg-warning/10 p-2.5">
+            <p className="text-xs font-medium">
+              {duplicates.length} account{duplicates.length === 1 ? " was" : "s were"} skipped
+              as already linked
+            </p>
+            <ul className="mt-1 space-y-0.5">
+              {duplicates.map((d, i) => (
+                <li key={i} className="text-xs text-muted-foreground">
+                  {d.name}
+                  {d.mask ? ` …${d.mask}` : ""} — already tracked under {d.already_under}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              The same card seen from two logins is one card. Adding it again would double
+              its balance and every charge on it.
+            </p>
+          </div>
+        )}
         <div className="mt-4 space-y-2">
           {rows.map((a, i) => (
             <div key={a.id} className="flex items-center gap-3 rounded-md border p-2">

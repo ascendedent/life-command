@@ -43,7 +43,47 @@ export async function POST(request: Request) {
 
     // Pull accounts immediately so the business-flag step has data
     const accountsRes = await plaid.accountsGet({ access_token: accessToken });
+
+    // A card two people can both see is one card. Linking it under each of
+    // their logins produces two Plaid Items, and Plaid issues a *different*
+    // account_id per Item — so the unique constraint on plaid_account_id does
+    // not fire, and the same balance and the same transactions land twice.
+    // A shared Quicksilver did exactly that: net worth was wrong by the full
+    // balance and every charge on it was counted twice.
+    //
+    // Matched on institution, mask, type and name together. Mask alone is not
+    // enough — a loan and a savings account at the same credit union can share
+    // the last four and be entirely different accounts.
+    const { data: known } = await supabase
+      .from("accounts")
+      .select("id, name, type, mask, institution_id, institutions (name, plaid_institution_id), household_members (name)")
+      .neq("institution_id", inst.id);
+    const dupeKey = (institution: string | null, mask: string | null, type: string, name: string) =>
+      `${(institution ?? "").toLowerCase()}|${mask ?? ""}|${type}|${name.toLowerCase()}`;
+    const seen = new Map<string, string>();
+    for (const k of known ?? []) {
+      const kInst = k.institutions as unknown as { name: string; plaid_institution_id: string | null } | null;
+      const holder = (k.household_members as unknown as { name: string } | null)?.name ?? "another login";
+      seen.set(
+        dupeKey(kInst?.plaid_institution_id ?? kInst?.name ?? null, k.mask, k.type, k.name),
+        holder
+      );
+    }
+
+    const duplicates: { name: string; mask: string | null; already_under: string }[] = [];
+    const thisInstitutionKey =
+      body.institution?.institution_id ?? body.institution?.name ?? null;
+
     for (const a of accountsRes.data.accounts) {
+      const key = dupeKey(thisInstitutionKey, a.mask ?? null, a.type, a.name);
+      const heldBy = seen.get(key);
+      if (heldBy) {
+        // Not created at all. Storing it and excluding it later would mean
+        // every money query having to remember to exclude it, and one that
+        // forgot would be wrong in a way nobody would notice.
+        duplicates.push({ name: a.name, mask: a.mask ?? null, already_under: heldBy });
+        continue;
+      }
       await supabase.from("accounts").upsert(
         {
           institution_id: inst.id,
@@ -85,10 +125,15 @@ export async function POST(request: Request) {
         name: body.institution?.name,
         accounts: accounts?.length ?? 0,
         member_id: body.member_id ?? null,
+        duplicates_skipped: duplicates.length,
       },
     });
 
-    return NextResponse.json({ institution_id: inst.id, accounts: accounts ?? [] });
+    return NextResponse.json({
+      institution_id: inst.id,
+      accounts: accounts ?? [],
+      duplicates,
+    });
   } catch (e: unknown) {
     const err = e as { response?: { data?: { error_message?: string } }; message: string };
     const msg = err.response?.data?.error_message ?? err.message;
