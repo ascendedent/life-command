@@ -3,6 +3,7 @@ import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { audit } from "@finance/shared";
+import { notify } from "./gmail.js";
 import { indexCategories, type CategoryMeta, type ReportTxn } from "@finance/shared/src/reports";
 import { pace, type GoalRow } from "@finance/shared/src/goals";
 import {
@@ -542,6 +543,36 @@ export async function runRecap(
       adjustments: out.adjustments.length,
       figures_checked: grounding.checked,
     });
+
+    // A recap nobody knows about is a recap nobody reads. It runs Sunday night
+    // and on the first of the month, and until now the only way to discover one
+    // existed was to go looking. Reuses the same channel as receipt and
+    // watchlist alerts, so there is one place notifications arrive.
+    //
+    // Only the single most consequential adjustment goes in the body. The point
+    // is to get the owner to open it, not to reproduce it in a push message —
+    // and an adjustment without its rationale is the kind of advice that gets
+    // acted on for the wrong reason.
+    try {
+      const top = [...out.adjustments].sort(
+        (a, b) => (b.projected_monthly_savings ?? 0) - (a.projected_monthly_savings ?? 0)
+      )[0];
+      const savings =
+        top && top.projected_monthly_savings > 0
+          ? ` (~$${top.projected_monthly_savings.toFixed(0)}/mo)`
+          : "";
+      await notify(
+        db,
+        `📊 ${periodType === "weekly" ? "Weekly" : "Monthly"} recap — scored ${Math.round(out.overall_score)}`,
+        top
+          ? `${facts.period_start} to ${facts.period_end}. Top of ${out.adjustments.length}: ${top.title}${savings}`
+          : `${facts.period_start} to ${facts.period_end}. Nothing worth changing.`,
+        { priority: "default" }
+      );
+    } catch (e: unknown) {
+      // Never fail a written recap because a push failed.
+      console.error(`[recap] notification failed: ${(e as Error).message}`);
+    }
 
     console.log(
       `[recap] ${periodType} ${facts.period_start}→${facts.period_end}: score ${out.overall_score}, ${out.adjustments.length} adjustments, ${grounding.checked} figures verified`

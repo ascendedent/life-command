@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { NetWorthChart } from "@/components/net-worth-chart";
+import { OverviewAdvice } from "@/components/overview-advice";
 import { LinkInstitution } from "@/components/link-institution";
 import { SyncNow } from "@/components/sync-now";
 
@@ -103,11 +104,15 @@ export default async function OverviewPage() {
           <CardContent>
             <p className="font-mono text-2xl">{pendingRecs ?? 0}</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Agent goes live in Phase 2
+              {pendingRecs
+                ? "awaiting acknowledgement in the queue"
+                : "nothing waiting on you"}
             </p>
           </CardContent>
         </Card>
       </div>
+
+      <OverviewAdvice />
 
       <Card>
         <CardHeader>
