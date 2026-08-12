@@ -41,7 +41,7 @@ export default async function OverviewPage() {
     supabase
       .from("institutions")
       .select(
-        "id, name, status, last_sync_at, last_error, accounts (id, name, type, subtype, mask, current_balance, is_business, business_entity)"
+        "id, name, status, last_sync_at, last_error, accounts (id, name, type, subtype, mask, current_balance, is_business, business_entity, household_members (name))"
       )
       .order("name"),
     supabase.from("net_worth_snapshots").select("date, total").order("date").limit(400),
@@ -149,6 +149,19 @@ export default async function OverviewPage() {
                               <span className="text-warning">
                                 {" "}
                                 · {a.business_entity ?? "business"}
+                              </span>
+                            )}
+                            {/* Whose account it is, when the household has
+                                more than one person to tell apart. */}
+                            {(a.household_members as unknown as { name: string } | null)
+                              ?.name && (
+                              <span>
+                                {" "}
+                                ·{" "}
+                                {
+                                  (a.household_members as unknown as { name: string })
+                                    .name
+                                }
                               </span>
                             )}
                           </p>
