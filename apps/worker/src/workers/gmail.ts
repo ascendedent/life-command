@@ -74,26 +74,43 @@ export async function notify(
   opts: { priority?: "urgent" | "default"; ruleId?: string; anticipatedId?: string; txnId?: string } = {}
 ) {
   const topic = process.env.NTFY_TOPIC;
+  let delivered = false;
+
   if (topic) {
     try {
-      await fetch(`https://ntfy.sh/${topic}`, {
+      // ntfy's JSON form, not the header form. Titles here carry emoji — every
+      // one of them does — and an HTTP header is a ByteString, so putting "📊"
+      // in a Title header throws before the request is even sent. It was caught
+      // and logged to the console, and the row below was still written saying
+      // "ntfy", so the failure looked exactly like success: every notification
+      // this platform has ever raised was silently dropped.
+      const res = await fetch("https://ntfy.sh", {
         method: "POST",
-        headers: {
-          Title: title,
-          Priority: opts.priority === "urgent" ? "urgent" : "default",
-          Tags: opts.priority === "urgent" ? "rotating_light" : "moneybag",
-        },
-        body,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic,
+          title,
+          message: body,
+          priority: opts.priority === "urgent" ? 5 : 3,
+          tags: [opts.priority === "urgent" ? "rotating_light" : "moneybag"],
+        }),
       });
+      delivered = res.ok;
+      if (!res.ok) {
+        console.error(`[notify] ntfy rejected: HTTP ${res.status} ${await res.text()}`);
+      }
     } catch (e: unknown) {
       console.error("[notify] ntfy failed:", (e as Error).message);
     }
   }
+
   await db.from("notifications_log").insert({
     rule_id: opts.ruleId ?? null,
     anticipated_transaction_id: opts.anticipatedId ?? null,
     transaction_id: opts.txnId ?? null,
-    channel: topic ? "ntfy" : "email",
+    // What actually happened, not what was configured. Recording the intent
+    // is how a broken channel stays invisible.
+    channel: delivered ? "ntfy" : topic ? "ntfy_failed" : "none",
     content: `${title}: ${body}`,
   });
 }
