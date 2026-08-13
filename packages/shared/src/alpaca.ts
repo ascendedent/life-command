@@ -6,6 +6,13 @@
 
 const PAPER_BASE = "https://paper-api.alpaca.markets";
 const LIVE_BASE = "https://api.alpaca.markets";
+// Market data is a different host from trading, and the same host for paper and
+// live — a paper account reads real prices. Asking the trading host for a quote
+// returns 404, which `lastPrice` swallowed into "no price available", which the
+// guardrails read as an unpriceable order. Every share-denominated proposal
+// would have been discarded, and the local stub agreed because it was written
+// to match this code rather than the API.
+const DATA_BASE = "https://data.alpaca.markets";
 
 export type ExecutionMode = "paper" | "live";
 
@@ -125,12 +132,15 @@ export function listPositions(mode: ExecutionMode): Promise<AlpacaPosition[]> {
 }
 
 /** Latest trade price, used to value an order before the guardrails see it. */
-export async function lastPrice(mode: ExecutionMode, symbol: string): Promise<number | null> {
+export async function lastPrice(_mode: ExecutionMode, symbol: string): Promise<number | null> {
+  const base = process.env.ALPACA_DATA_BASE || DATA_BASE;
   try {
-    const data = await call<{ trade?: { p?: number } }>(
-      mode,
-      `/v2/stocks/${encodeURIComponent(symbol)}/trades/latest`
+    const res = await fetch(
+      `${base}/v2/stocks/${encodeURIComponent(symbol)}/trades/latest`,
+      { headers: headers() }
     );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { trade?: { p?: number } };
     return data.trade?.p ?? null;
   } catch {
     return null;

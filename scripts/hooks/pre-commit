@@ -35,7 +35,12 @@ emails=$(grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' <<< "$added" 
 [ -n "$emails" ] && flag "email address" "$(head -3 <<< "$emails" | tr '\n' ' ')"
 
 # Long digit runs: account, routing and transaction reference numbers.
-digits=$(grep -oE '\b[0-9]{9,}\b' <<< "$added" | grep -vE '^1[0-9]{12}$' || true)
+# A run of one repeated digit is a sentinel or a placeholder, never an account
+# number — the all-zero UUID used as a SQL sentinel tripped this and there is no
+# version of that string worth protecting.
+digits=$(grep -oE '\b[0-9]{9,}\b' <<< "$added" \
+  | grep -vE '^1[0-9]{12}$' \
+  | grep -vE '^(0+|1+|2+|3+|4+|5+|6+|7+|8+|9+)$' || true)
 [ -n "$digits" ] && flag "9+ digit number (account/reference?)" "$(head -3 <<< "$digits" | tr '\n' ' ')"
 
 # Whatever this install has decided is personal.

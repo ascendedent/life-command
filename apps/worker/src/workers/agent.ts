@@ -14,6 +14,10 @@ import {
   lastPrice,
   listPositions,
   validateTradeProposal,
+  evaluateFloors,
+  loadFloorState,
+  type Floor,
+  type FloorState,
   type ExecutionMode,
   type GuardrailConfig,
 } from "@finance/shared";
@@ -104,7 +108,8 @@ Rules:
 - Only surface recommendations that are genuinely worth the owner's attention: unusual spend, credit utilization risks, upcoming recurring charges that look wrong, cash-flow trends, idle cash, subscription anomalies. Zero recommendations is a valid answer.
 - The owner has seen your last recommendations and their outcomes (provided). Do not repeat rejected or recently-made recommendations without new supporting data.
 - Refer to an account only by its exact \`label\` from the snapshot. Never pair an account name with a last-four yourself: several accounts share a name and differ only by mask, so a name you assemble is a different account from the one you meant. This is checked, and a mismatch discards the run.
-- Amounts follow the snapshot's convention: positive transaction amounts are outflows.`;
+- Amounts follow the snapshot's convention: positive transaction amounts are outflows.
+- \`floors\` are limits the owner set on their own balance sheet, not suggestions. Never recommend anything that would breach one, and never describe a floor's headroom as spare money without saying what it is holding back.`;
 
 const ADVISORY_ONLY = `
 - Execution is off. Never propose specific trades or transfers — frame every finding as an alert.`;
@@ -140,6 +145,9 @@ interface TradeCapability {
   spentToday: number;
   /** Goes into the snapshot verbatim; null when trading is off. */
   broker: Record<string, unknown> | null;
+  /** The owner's balance-sheet invariants, and the world they measure. */
+  floors: Floor[];
+  floorState: FloorState | null;
 }
 
 const tradingOff = (reason: string): TradeCapability => ({
@@ -151,6 +159,8 @@ const tradingOff = (reason: string): TradeCapability => ({
   positions: [],
   spentToday: 0,
   broker: null,
+  floors: [],
+  floorState: null,
 });
 
 /**
@@ -215,7 +225,11 @@ export async function resolveTradeCapability(
       market_value: Number(p.market_value),
     }));
     const spent = await spentToday(db);
+    const { data: floorRows } = await db.from("agent_floors").select("*");
+    const floors = (floorRows ?? []) as Floor[];
     return {
+      floors,
+      floorState: floors.length ? await loadFloorState(db) : null,
       enabled: true,
       reason: null,
       mode,
@@ -342,6 +356,14 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
 
   const trade = await resolveTradeCapability(db, config ?? null);
   if (!trade.enabled) console.log(`[agent] trade proposals off: ${trade.reason}`);
+  // Trading being off does not make the owner's floors irrelevant: the agent
+  // still gives advice about money, and advice that ignores a stated floor is
+  // the same mistake as an order that does.
+  if (!trade.floorState) {
+    const { data: floorRows } = await db.from("agent_floors").select("*");
+    trade.floors = (floorRows ?? []) as Floor[];
+    trade.floorState = trade.floors.length ? await loadFloorState(db) : null;
+  }
 
   // Totals the model would otherwise have to add up itself. It is not allowed
   // to — every figure it cites has to come from here — and its first real run
@@ -441,6 +463,20 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
         }
       : null,
     broker: trade.broker,
+    // The owner's floors, with today's headroom. Advisory recommendations are
+    // held to these as well as executable ones — telling someone to move money
+    // their own stated limits forbid is worse than saying nothing.
+    floors: trade.floorState
+      ? evaluateFloors(trade.floors, trade.floorState, null).readings.map((r) => ({
+          floor: r.label,
+          currently: round(r.projected),
+          limit: round(r.limit),
+          headroom: round(r.headroom),
+          within: r.ok,
+          measurable: r.evaluable,
+          detail: r.detail,
+        }))
+      : [],
     last_recommendations: lastRecs ?? [],
   };
 
@@ -505,6 +541,17 @@ export async function shapeTradeProposal(
     }
   );
   if (!verdict.ok) return { ok: false, problems: verdict.violations };
+
+  // The owner's floors bind advice as well as execution. An agent that
+  // recommends what its own limits would refuse is an agent training the owner
+  // to ignore it.
+  if (trade.floors.length && trade.floorState) {
+    const floorVerdict = evaluateFloors(trade.floors, trade.floorState, {
+      account_id: trade.accountId,
+      amount: side === "buy" ? -amount : amount,
+    });
+    if (!floorVerdict.ok) return { ok: false, problems: floorVerdict.violations };
+  }
 
   return {
     ok: true,

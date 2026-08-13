@@ -531,16 +531,44 @@ Each phase ships independently and is fully usable before the next begins. Do no
   - The Investments page reads positions and orders from the broker, never from our tables: the broker is the only thing that knows whether an order filled or what a position is worth now. Our `executions` rows sit beside them and answer a different question — what the platform asked for, including what its guardrails refused, which the broker never heard about.
   - Grounding admits one exception: the proposed order size. It is the model's own proposal about the future, not a claim about the owner's past, and it is judged in dollars by the guardrails rather than by whether it appears in the snapshot. Every figure in the rationale is still held to the rule.
 - **3b: Kalshi demo.** Same flow against Kalshi's demo environment for `prediction_position` recommendations.
-- **3c: Transfers.** Astra (or Alpaca ACH for brokerage funding) integration for `transfer` recommendations between the owner's own accounts, always approval-gated. Start with a tiny cap ($50) and raise deliberately.
-- Executor hard rules regardless of approval: reject if amount exceeds caps, if daily total would exceed cap, if account is not flagged agent-eligible, if recommendation is older than its expiry.
+- **3c: Moving real money.** `transfer` and `card_payment` recommendations against the owner's own accounts, always approval-gated, starting at a $50 cap raised deliberately. This is where the platform stops being an advisor.
+  - **Destinations are an allow-list, never a field the model fills in.** The same rule that governs the brokerage account governs every account money can reach: the owner names the pairs it may move between, code resolves them, and a destination that is not on the list does not exist as far as the executor is concerned. The most expensive mistake available to this system is a correct amount sent somewhere plausible.
+  - **Paying a card is harder than it sounds** and the plan should not pretend otherwise. Generic ACH moves money between *your* bank accounts; it does not pay a card, because the card issuer has to accept a push and most do not expose one. Realistic routes, in order of preference: (a) the agent manages the chequing buffer and the issuer's own autopay does the paying — no new provider, no new risk surface, and the hard part (having the money there) is the part the agent is actually good at; (b) a liability-payment provider such as Method Financial, which does pay cards by account number, at the cost of another vendor holding another set of credentials; (c) advisory only — the agent says what to pay and the owner clicks at the issuer. **(a) is the default.** Verify (b) before committing to it.
+  - **Providers to evaluate at 3c:** Plaid Transfer (already have the Plaid relationship), Astra, Dwolla, Method (cards specifically), Alpaca ACH (brokerage funding only). Deciding this is a phase gate, not an implementation detail.
+- Executor hard rules regardless of approval: reject if amount exceeds caps, if daily total would exceed cap, if account is not flagged agent-eligible, if recommendation is older than its expiry, **if the resulting balance sheet would breach a floor** (below).
 - Full audit logging of every execution attempt and result.
 - **Accept:** 30 days of paper trading with zero guardrail violations, transfer round-trip of a small real amount succeeds and logs correctly, every execution visible in Audit.
 
+### Phase 3.5: Floors — guardrails about the world, not about the order
+
+Every guardrail up to here asks the same question: *is this action too big?* Per-transaction cap, daily cap, position size, position count — all properties of the action, checkable without knowing anything about the owner.
+
+Moving real money needs the other question: *is the world after this action still one the owner is willing to live in?* "Never let my liquid cash fall below $10,000" cannot be expressed as a cap on any single transfer. Two $4,000 transfers, each individually fine, are not fine. A cap is a property of an action; a floor is a property of a state, and the two are checked differently — the floor has to be evaluated against a **projection** of the balance sheet after the action, not against the action itself.
+
+**Kinds of floor:**
+- **Liquid minimum.** Total across depository accounts may not fall below an absolute figure, or below N months of average expenses — the second is better because it moves with the owner's life instead of going stale.
+- **Per-account minimum.** The chequing account that direct debits hit may not be drained even if the household total is healthy. Overdraft is a per-account event.
+- **Committed cash is not available cash.** `recurring_items` already knows what is due and when. A floor evaluated against a raw balance is a floor that lets the agent spend the rent because it is not due until Tuesday. Available = balance − obligations falling due inside the horizon.
+- **Credit utilization ceiling.** Never let total or per-card utilization cross a threshold, because the cost of crossing it is a credit score, not a fee.
+- **Never-touch accounts.** Some accounts are not the agent's business at any level: the emergency fund, the partner's individual accounts, anything held in trust. Distinct from "not agent-controlled" — that governs where orders land, this governs what may be counted or drawn from at all.
+
+**Design rules:**
+- Floors are **hard, not advisory**, and outrank approval exactly the way caps do. Approving a transfer that breaches a floor is the owner saying "I want this" while the floor is the owner saying "not below here" — the earlier, calmer instruction wins, and the refusal says which floor and by how much.
+- Floors are evaluated **twice**, like everything else: once when the agent proposes, so the queue never offers a decision that will be refused, and once at execution against balances that have moved since.
+- The projection is **conservative on every axis**: pending outflows count, pending inflows do not; the sync's staleness is subtracted rather than ignored. A floor computed from a balance last synced six hours ago is a guess, and the honest response to a stale balance is to refuse, not to assume.
+- **Floors also constrain advice, not just execution.** An agent that recommends what its own limits would refuse is an agent training the owner to ignore it.
+
+**UI:** floors live on a *Limits* surface beside the caps, each stated in the owner's words with its current headroom shown live — "Liquid minimum $10,000 · you are $7,013 above it". Every approval that touches money shows the projected before-and-after against every floor it comes near, because the number that matters at the moment of approval is not the size of the transfer, it is what is left afterwards.
+
 ### Phase 4: Bounded Autonomy (est. 2-3 sessions)
 
-- Autonomy level 3 unlocks auto-execution ONLY for: recommendation types explicitly allow-listed in `agent_config`, amounts under the per-txn cap, within daily cap, on the agent-controlled sub-account only
+### Phase 4: Bounded Autonomy (est. 2-3 sessions)
+
+- Autonomy level 3 unlocks auto-execution ONLY for: recommendation types explicitly allow-listed in `agent_config`, amounts under the per-txn cap, within daily cap, on the agent-controlled sub-account only, **and with every floor still satisfied after the action**
 - Everything above thresholds still queues for approval, permanently
-- Circuit breakers live: drawdown halt (pause all auto-execution if agent-controlled account drops X% in 7 days), velocity halt (max N auto-executions/day), failure halt (2 consecutive execution failures pauses the agent)
+- Circuit breakers live: drawdown halt (pause all auto-execution if agent-controlled account drops X% in 7 days), velocity halt (max N auto-executions/day), failure halt (2 consecutive execution failures pauses the agent), **floor-proximity halt** (stop acting on its own once any floor is within a set distance — the last dollars above a floor are the ones a human should be spending), and **novelty gate** (the first use of any action type, or any destination, always queues for approval no matter what the caps say)
+- **A kill switch reachable from every page**, not buried in settings. Autonomy is worth having only if stopping it is faster than thinking about it.
+- **Every autonomous action is reversible or was pre-approved in kind.** Before an action type is allow-listed for auto-execution it must be one the owner has already approved by hand enough times to have an opinion about, and the weekly report has to show the counterfactual: what the balance would be had the agent done nothing.
 - Push notifications (start with email via Supabase, or ntfy.sh) for every auto-execution and every breaker trip
 - Weekly agent performance report: what it did, outcomes, vs baseline of doing nothing
 - **Accept:** one full week of bounded autonomy on small caps with correct notifications, then deliberately trip each circuit breaker in a test and confirm halts.

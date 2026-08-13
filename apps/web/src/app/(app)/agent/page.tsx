@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ExecutionReadiness } from "@/components/agent/execution-readiness";
+import { FloorsCard } from "@/components/agent/floors-card";
 import { cn } from "@/lib/utils";
 
 const LEVELS = [
@@ -223,6 +224,8 @@ export default function AgentPage() {
           )}
         </CardContent>
       </Card>
+
+      <FloorsCard />
 
       <ExecutionReadiness key={configVersion} onChanged={load} />
 

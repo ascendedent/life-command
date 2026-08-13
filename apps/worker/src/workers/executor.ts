@@ -8,6 +8,9 @@ import {
   placeOrder,
   AlpacaError,
   validateTradeProposal,
+  evaluateFloors,
+  loadFloorState,
+  type Floor,
   type ExecutionMode,
   type GuardrailConfig,
   type GuardrailContext,
@@ -97,6 +100,13 @@ export async function executorTick(db: SupabaseClient): Promise<void> {
     console.error("[executor] no agent_config row — refusing to execute anything");
     return;
   }
+  // Loaded once per tick: the floors and the balance sheet they are measured
+  // against do not change between two recommendations in the same pass, and
+  // re-deriving them per row would make a long queue read a moving world.
+  const { data: floorRows } = await db.from("agent_floors").select("*");
+  const floors = (floorRows ?? []) as Floor[];
+  const floorState = floors.length ? await loadFloorState(db) : null;
+
   const mode: ExecutionMode = cfgRow.execution_mode === "live" ? "live" : "paper";
   const cfg: GuardrailConfig = {
     autonomy_level: cfgRow.autonomy_level,
@@ -227,6 +237,22 @@ export async function executorTick(db: SupabaseClient): Promise<void> {
     };
 
     const verdict = checkGuardrails(req, cfg, ctx);
+
+    // Caps ask whether the action is too big; floors ask whether the balance
+    // sheet it leaves behind is one the owner agreed to. Both have to pass, and
+    // the floors are checked here — at execution, against balances that have
+    // moved since the agent proposed — for the same reason the caps are.
+    const floorVerdict =
+      floors.length && floorState
+        ? evaluateFloors(floors, floorState, {
+            account_id: payload.account_id ?? null,
+            // A buy takes cash out of the account it lands in; a sell returns it.
+            amount: side === "buy" ? -amount : amount,
+          })
+        : { ok: true, violations: [] as string[], readings: [] };
+    if (!floorVerdict.ok) verdict.violations.push(...floorVerdict.violations);
+    verdict.ok = verdict.ok && floorVerdict.ok;
+
     if (!verdict.ok) {
       await record(db, {
         recommendation_id: rec.id,
