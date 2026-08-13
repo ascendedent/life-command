@@ -64,7 +64,12 @@ function headers(): Record<string, string> {
 function baseUrl(mode: ExecutionMode): string {
   // Live is reachable only when the owner has explicitly switched
   // agent_config.execution_mode; the default is paper and stays paper.
-  return mode === "live" ? LIVE_BASE : PAPER_BASE;
+  if (mode === "live") return LIVE_BASE;
+  // Paper only, and never live: the executor had never placed an order
+  // anywhere, and "it works" should not first be tested with real keys against
+  // a real venue. Pointing paper at a local stub exercises order placement,
+  // idempotency and the daily cap without an account.
+  return process.env.ALPACA_PAPER_BASE || PAPER_BASE;
 }
 
 async function call<T>(

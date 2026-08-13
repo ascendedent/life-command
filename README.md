@@ -454,6 +454,7 @@ what the web app and workers need.
 | `AGENT_MODEL` / `RECEIPT_MODEL` / `ENRICH_MODEL` / `RECAP_MODEL` | per-function model overrides (default `claude-sonnet-5`) | optional |
 | `NTFY_TOPIC` | push notifications (recaps, receipts, watchlist) | optional |
 | `ALPACA_KEY_ID` / `ALPACA_SECRET_KEY` | Phase 3a paper trading | needed to execute |
+| `ALPACA_PAPER_BASE` | points paper at a stub broker instead of Alpaca, for exercising order placement without an account | testing only |
 | `KALSHI_*` | Phase 3b | not yet needed |
 
 `NTFY_TOPIC` is a credential, not a name: on ntfy.sh anyone who knows the topic
