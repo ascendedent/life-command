@@ -525,6 +525,10 @@ Each phase ships independently and is fully usable before the next begins. Do no
 ### Phase 3: Human-Approved Execution (est. 3-5 sessions)
 
 - **3a: Paper trading.** Alpaca paper account linked. Agent may emit `trade` recommendations with full payloads. Approve triggers executor, which re-validates guardrails and places the paper order. Investments page live. Run in paper mode for a minimum of 30 days.
+  - The agent's output schema is narrowed to what is switched on: with trading off it is not given the vocabulary to express a trade at all. A rule the model cannot express is worth more than a rule in the prompt telling it not to.
+  - The agent never chooses the account. Exactly one account may be flagged `is_agent_controlled`; code resolves it and stamps it into the payload, and two flagged accounts disable trading rather than making the agent pick.
+  - A proposal is dry-run against the *same* `checkGuardrails` the executor uses, hypothesising approval and autonomy 2, before it is written. The queue then only offers Approve on an order that could actually go through, and the executor still decides again at execution time against a world that has moved.
+  - Grounding admits one exception: the proposed order size. It is the model's own proposal about the future, not a claim about the owner's past, and it is judged in dollars by the guardrails rather than by whether it appears in the snapshot. Every figure in the rationale is still held to the rule.
 - **3b: Kalshi demo.** Same flow against Kalshi's demo environment for `prediction_position` recommendations.
 - **3c: Transfers.** Astra (or Alpaca ACH for brokerage funding) integration for `transfer` recommendations between the owner's own accounts, always approval-gated. Start with a tiny cap ($50) and raise deliberately.
 - Executor hard rules regardless of approval: reject if amount exceeds caps, if daily total would exceed cap, if account is not flagged agent-eligible, if recommendation is older than its expiry.
@@ -554,6 +558,16 @@ is small enough to land without a phase of its own.
   dollar exactly once the way the budget does (a split hides its parent, so
   `hidden = false` alone), and offers the same query as a Transactions link for
   when editing is what is actually wanted.
+
+- **Net worth history is discontinuous when accounts are linked.** Linking six
+  more credit cards on one day moved the series down by roughly the balance
+  those cards carried, and the agent duly reported a plunge. No debt was
+  incurred; it
+  became visible. A snapshot records a total without recording which accounts it
+  was a total *of*, so nothing downstream can tell "you spent this" from "you
+  can now see this." The fix is to store the account set alongside the total and
+  treat a change in that set as a discontinuity rather than a movement — both in
+  the chart and in what the agent is allowed to call a trend.
 
 ### Phase 5 (later, optional)
 

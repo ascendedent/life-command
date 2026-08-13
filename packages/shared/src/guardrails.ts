@@ -76,6 +76,17 @@ export function checkGuardrails(
     v.push(`status is "${ctx.status}", not approved`);
   }
 
+  // The autonomy dial is the owner's master switch — 0 read-only, 1 recommend,
+  // 2 approve-to-execute, 3 bounded auto — and nothing was reading it. Every
+  // other limit was enforced, so the hole was invisible: turning the dial down
+  // to 0 looked like it disarmed the executor and did not. Approval alone is
+  // not consent to execute; the owner has to have said execution is on at all.
+  if (cfg.autonomy_level < 2) {
+    v.push(
+      `autonomy level ${cfg.autonomy_level} does not permit execution (2 = approve-to-execute)`
+    );
+  }
+
   // An expired recommendation describes a market that no longer exists.
   if (ctx.expires_at && Date.parse(ctx.expires_at) < ctx.now.getTime()) {
     v.push(`recommendation expired at ${ctx.expires_at}`);
@@ -138,4 +149,90 @@ export function checkGuardrails(
   }
 
   return { ok: v.length === 0, violations: v };
+}
+
+
+// -----------------------------------------------------------------------------
+// Trade proposals
+// -----------------------------------------------------------------------------
+
+/**
+ * A trade the agent proposed, after shaping. The dollar/share distinction
+ * matters all the way down: a cap in dollars cannot be enforced against a
+ * number of shares until something prices it.
+ */
+export interface TradeProposal {
+  symbol: string;
+  side: "buy" | "sell";
+  /** Dollar-denominated order. Mutually exclusive with `qty`. */
+  notional: number | null;
+  /** Share-denominated order. Mutually exclusive with `notional`. */
+  qty: number | null;
+  limit_price: number | null;
+  time_in_force: "day" | "gtc";
+}
+
+export type TradeProposalResult =
+  | { ok: true; proposal: TradeProposal }
+  | { ok: false; problems: string[] };
+
+const positive = (n: unknown): n is number =>
+  typeof n === "number" && Number.isFinite(n) && n > 0;
+
+/**
+ * Shape and validate a proposed order before anything acts on it.
+ *
+ * Shared by the agent (which refuses to write a proposal that cannot execute)
+ * and the executor (which refuses to submit one, whoever wrote it). The
+ * combinations rejected here are the ones the broker rejects too — a notional
+ * order carrying a limit price, a GTC order with no share count — and finding
+ * that out from a 422 after an approval is a worse way to learn it.
+ */
+export function validateTradeProposal(raw: unknown): TradeProposalResult {
+  const p = (raw ?? {}) as Record<string, unknown>;
+  const problems: string[] = [];
+
+  const symbol = String(p.symbol ?? "").trim().toUpperCase();
+  if (!/^[A-Z.]{1,10}$/.test(symbol)) {
+    problems.push(`symbol "${p.symbol ?? ""}" is not a plausible ticker`);
+  }
+
+  const side = p.side === "buy" || p.side === "sell" ? p.side : null;
+  if (!side) problems.push(`side "${p.side ?? ""}" is neither buy nor sell`);
+
+  const notional = positive(p.notional) ? p.notional : null;
+  const qty = positive(p.qty) ? p.qty : null;
+  if (notional && qty) {
+    problems.push("order gives both a dollar amount and a share count — pick one");
+  } else if (!notional && !qty) {
+    problems.push("order gives neither a positive dollar amount nor a positive share count");
+  }
+
+  const limit = p.limit_price == null ? null : positive(p.limit_price) ? p.limit_price : Number.NaN;
+  if (Number.isNaN(limit)) {
+    problems.push(`limit price ${String(p.limit_price)} is not a positive number`);
+  } else if (limit && notional) {
+    // Alpaca prices a notional order at the market; a limit needs a share count.
+    problems.push("a limit price requires a share count, not a dollar amount");
+  }
+
+  // A notional order is market-and-day at the broker, so anything else asked
+  // for is silently not what would happen. Say so rather than quietly coerce.
+  const tif = p.time_in_force === "gtc" ? "gtc" : "day";
+  if (tif === "gtc" && notional) {
+    problems.push("a dollar-denominated order is good for the day only, not GTC");
+  }
+
+  if (problems.length) return { ok: false, problems };
+  return {
+    ok: true,
+    proposal: {
+      symbol,
+      side: side as "buy" | "sell",
+      notional,
+      qty,
+      limit_price: (limit as number) || null,
+      time_in_force: tif,
+    },
+  };
 }

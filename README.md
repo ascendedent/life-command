@@ -54,8 +54,9 @@ real mail.
 - **Receipts (Phase 2):** multi-mailbox Gmail ingestion with per-inbox label
   mapping, LLM parse fallback, the anticipation engine, scored reconciliation,
   and the vendor watchlist — see Phase 2 notes.
-- **The agent (Phase 2):** daily analysis run on `claude-sonnet-5` producing
-  schema-validated advisory recommendations into the Approval Queue.
+- **The agent (Phase 2/3a):** daily analysis run on `claude-sonnet-5` producing
+  schema-validated recommendations into the Approval Queue — advisory alerts,
+  and `trade` proposals once trading is switched on.
 - **Reports (Phase 2):** cash flow Sankey, MoM/YoY trends, a saved custom
   report builder, the business tax export, and the recaps reader.
 - **Goals (Phase 2):** three-step wizard with semantic linkage and a historical
@@ -360,8 +361,9 @@ Alpaca, Kalshi) to root `.env` — `sync-env` preserves unmanaged lines.
 - **Notifications.** Set `NTFY_TOPIC` in `.env` and subscribe to that topic in
   the ntfy app for push alerts at email speed.
 - **The agent.** Daily 06:00, or *Run analysis now* on `/agent`. Advisory
-  only (autonomy locked to 0–1 until Phase 3). Model via `AGENT_MODEL`
-  (default `claude-sonnet-5`); receipt parsing via `RECEIPT_MODEL`.
+  until trading is switched on (see *Turning on paper trading*). Model via
+  `AGENT_MODEL` (default `claude-sonnet-5`); receipt parsing via
+  `RECEIPT_MODEL`.
 - **Budgets.** `/budget` — auto-fill from trailing 6-month averages,
   category and flex modes, rollovers, pace bars.
 - **Reports.** `/reports`, five tabs sharing one period picker. *Cash flow* is
@@ -417,6 +419,11 @@ Alpaca, Kalshi) to root `.env` — `sync-env` preserves unmanaged lines.
   - [ ] Aldyn ([getaldyn.com](https://getaldyn.com)) Receipts API (Path A) — replaces Gmail OAuth
         once live (blocked on the Aldyn-side build)
 - [ ] **Phase 3 — Human-approved execution:** Alpaca paper → Kalshi demo → transfers, executor guardrails
+  - [x] Executor + guardrails in code, append-only `executions` ledger
+  - [x] Agent emits `trade` proposals, pre-checked against the same guardrails before they reach the queue
+  - [ ] 30 days of paper trading with zero guardrail violations (needs broker keys)
+  - [ ] Investments page (`/invest` is still a stub)
+  - [ ] Kalshi demo (`prediction_position`), then transfers
 - [ ] **Phase 4 — Bounded autonomy:** allow-listed auto-execution, circuit breakers, notifications
 - [ ] **Phase 5 — Hosted migration** (optional): Vercel + hosted Supabase + Render, same migrations
 - [ ] **Phase 5 — Desktop app packaging:** Tauri shell, approval-badge count on the tray icon, native notifications wired to `notification_rules` (tray v0 + launcher + installable PWA manifest exist now)
@@ -457,11 +464,34 @@ like a password.
 NTFY_TOPIC=lifecmd-$(openssl rand -hex 16)
 ```
 
-Nothing executes a trade until the caps in `agent_config` are raised from their
-defaults of `0` — `max_txn_amount`, `max_daily_amount`, `max_position_size`,
-`max_open_positions`, and `allowed_action_types` must include `trade`. A fresh
-install refuses every order, which is the intended starting state.
-`agent_config.execution_mode` defaults to `paper` and must be changed by hand.
+### Turning on paper trading
+
+A fresh install refuses every order, and that is the intended starting state.
+Trading is opt-in at several independent points, each checked against the world
+rather than asserted — turning on all but one of them does nothing:
+
+1. `ALPACA_KEY_ID` and `ALPACA_SECRET_KEY` in root `.env`, then
+   `npm run env:sync`.
+2. `agent_config.allowed_action_types` must contain `trade`.
+3. `agent_config.autonomy_level` — `1` lets the agent *propose* trades, `2`
+   lets an approved one *execute*. `0` is read-only and disarms both.
+4. The caps, all defaulting to `0`: `max_txn_amount`, `max_daily_amount`,
+   `max_position_size`, `max_open_positions`. A cap of zero refuses everything.
+5. Exactly one account flagged `is_agent_controlled`. Zero means no trading; two
+   or more also means no trading, because the agent must never pick between
+   accounts — code stamps the account into every order, the model never chooses.
+
+`agent_config.execution_mode` defaults to `paper` and must be changed by hand;
+the spec gates `live` on 30 days of clean paper trading.
+
+Both sides check the same rules. The agent discards a proposal that would breach
+a cap before the owner ever sees it, so the queue only offers Approve on
+something that could actually go through; the executor then re-derives every
+input from the database and the broker and decides again at execution time,
+because approval says "I want this" and says nothing about whether it is still
+inside the limits. Every attempt is written to `executions`, refusals included —
+"30 days with zero guardrail violations" is not checkable against a table that
+only remembers the orders that went through.
 
 Google OAuth setup: Cloud Console → enable Gmail API → OAuth consent screen
 (External, published unverified so refresh tokens don't expire weekly) →

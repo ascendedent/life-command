@@ -7,6 +7,7 @@ import {
   listPositions,
   placeOrder,
   AlpacaError,
+  validateTradeProposal,
   type ExecutionMode,
   type GuardrailConfig,
   type GuardrailContext,
@@ -29,14 +30,14 @@ import {
  * checkable against a table that only remembers the orders that went through.
  */
 
+/**
+ * The stored payload. Everything describing the order itself is validated by
+ * `validateTradeProposal`; the only field the executor reads directly is the
+ * account, because the agent never chooses it — code stamps in the one account
+ * the owner flagged agent-controlled.
+ */
 interface TradePayload {
-  symbol?: string;
-  side?: string;
-  qty?: number;
-  notional?: number;
-  limit_price?: number;
   account_id?: string;
-  time_in_force?: string;
 }
 
 async function record(
@@ -68,7 +69,7 @@ async function record(
 }
 
 /** Dollars already executed today — the input to the daily cap. */
-async function spentToday(db: SupabaseClient): Promise<number> {
+export async function spentToday(db: SupabaseClient): Promise<number> {
   const since = new Date();
   since.setUTCHours(0, 0, 0, 0);
   const { data } = await db
@@ -108,17 +109,40 @@ export async function executorTick(db: SupabaseClient): Promise<void> {
 
   for (const rec of approved) {
     const payload = (rec.payload ?? {}) as TradePayload;
-    const symbol = String(payload.symbol ?? "").toUpperCase();
-    const side = payload.side === "sell" ? "sell" : "buy";
+
+    // Whoever wrote the payload, it is validated here before anything acts on
+    // it. The agent checks the same rules when it proposes, but a row in a
+    // table is not proof of what wrote it, and a malformed order must fail
+    // against our own rules rather than against the broker's.
+    const shaped = validateTradeProposal(rec.payload);
+    if (!shaped.ok) {
+      await record(db, {
+        recommendation_id: rec.id,
+        mode, action: "trade",
+        request: { payload: rec.payload, account_id: payload.account_id ?? null },
+        outcome: "rejected",
+        violations: shaped.problems,
+      });
+      await db
+        .from("recommendations")
+        .update({ status: "failed", result: { rejected_by: "payload", problems: shaped.problems } })
+        .eq("id", rec.id);
+      await audit(db, "system", "execution_rejected", "recommendations", rec.id, {
+        problems: shaped.problems,
+      });
+      console.error(`[executor] ${rec.id} malformed payload: ${shaped.problems.join("; ")}`);
+      continue;
+    }
+    const { symbol, side } = shaped.proposal;
 
     // Price the order before judging it. A qty-denominated order has no dollar
     // value until the market says so, and a cap in dollars cannot be enforced
     // against a number of shares.
-    let amount = Number(payload.notional ?? 0);
+    let amount = shaped.proposal.notional ?? Number.NaN;
     let price: number | null = null;
-    if (!amount && payload.qty) {
+    if (shaped.proposal.qty) {
       price = alpacaConfigured() ? await lastPrice(mode, symbol) : null;
-      amount = price ? Number(payload.qty) * price : Number.NaN;
+      amount = price ? shaped.proposal.qty * price : Number.NaN;
     }
 
     // Broker truth for positions, not our own stale holdings table.
@@ -138,8 +162,9 @@ export async function executorTick(db: SupabaseClient): Promise<void> {
       symbol,
       side,
       amount,
-      qty: payload.qty ?? null,
-      notional: payload.notional ?? null,
+      qty: shaped.proposal.qty,
+      notional: shaped.proposal.notional,
+      limit_price: shaped.proposal.limit_price,
       price_used: price,
       account_id: payload.account_id ?? null,
       recommendation: rec.summary,
@@ -223,10 +248,12 @@ export async function executorTick(db: SupabaseClient): Promise<void> {
       const order = await placeOrder(mode, {
         symbol,
         side,
-        type: payload.limit_price ? "limit" : "market",
-        time_in_force: payload.time_in_force === "gtc" ? "gtc" : "day",
-        ...(payload.limit_price ? { limit_price: payload.limit_price } : {}),
-        ...(payload.notional ? { notional: payload.notional } : { qty: payload.qty }),
+        type: shaped.proposal.limit_price ? "limit" : "market",
+        time_in_force: shaped.proposal.time_in_force,
+        ...(shaped.proposal.limit_price ? { limit_price: shaped.proposal.limit_price } : {}),
+        ...(shaped.proposal.notional
+          ? { notional: shaped.proposal.notional }
+          : { qty: shaped.proposal.qty ?? undefined }),
         // Idempotency: a retry after a timeout must not open a second position.
         client_order_id: `rec-${rec.id}`,
       });
