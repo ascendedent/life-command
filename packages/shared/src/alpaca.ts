@@ -27,6 +27,29 @@ export interface AlpacaPosition {
   market_value: string;
   cost_basis: string;
   unrealized_pl: string;
+  unrealized_plpc: string;
+  avg_entry_price: string;
+  current_price: string;
+  /** Today's move, as a fraction. Alpaca's own figure, not ours to derive. */
+  change_today: string;
+  asset_class: string;
+  side: string;
+}
+
+export interface AlpacaOrderRecord {
+  id: string;
+  client_order_id: string;
+  symbol: string;
+  side: string;
+  qty: string | null;
+  notional: string | null;
+  filled_qty: string | null;
+  filled_avg_price: string | null;
+  type: string;
+  time_in_force: string;
+  status: string;
+  submitted_at: string;
+  filled_at: string | null;
 }
 
 export interface AlpacaAccount {
@@ -112,6 +135,21 @@ export async function lastPrice(mode: ExecutionMode, symbol: string): Promise<nu
   } catch {
     return null;
   }
+}
+
+/**
+ * Recent orders as the broker remembers them. Our `executions` table records
+ * what we asked for; this records what happened to it — a fill, a rejection at
+ * the venue, a cancellation we never initiated.
+ */
+export function listOrders(
+  mode: ExecutionMode,
+  limit = 25
+): Promise<AlpacaOrderRecord[]> {
+  return call<AlpacaOrderRecord[]>(
+    mode,
+    `/v2/orders?status=all&limit=${limit}&direction=desc`
+  );
 }
 
 export function placeOrder(mode: ExecutionMode, order: AlpacaOrder): Promise<Record<string, unknown>> {

@@ -57,6 +57,9 @@ real mail.
 - **The agent (Phase 2/3a):** daily analysis run on `claude-sonnet-5` producing
   schema-validated recommendations into the Approval Queue — advisory alerts,
   and `trade` proposals once trading is switched on.
+- **Investments (Phase 3a):** broker positions with unrealized P&L and
+  allocation, recent orders, and the platform's own execution attempts —
+  refusals included, since a guardrail that holds looks like nothing happening.
 - **Reports (Phase 2):** cash flow Sankey, MoM/YoY trends, a saved custom
   report builder, the business tax export, and the recaps reader.
 - **Goals (Phase 2):** three-step wizard with semantic linkage and a historical
@@ -422,7 +425,7 @@ Alpaca, Kalshi) to root `.env` — `sync-env` preserves unmanaged lines.
   - [x] Executor + guardrails in code, append-only `executions` ledger
   - [x] Agent emits `trade` proposals, pre-checked against the same guardrails before they reach the queue
   - [ ] 30 days of paper trading with zero guardrail violations (needs broker keys)
-  - [ ] Investments page (`/invest` is still a stub)
+  - [x] Investments page — positions with P&L and allocation, broker orders, and this platform's own attempts including refusals
   - [ ] Kalshi demo (`prediction_position`), then transfers
 - [ ] **Phase 4 — Bounded autonomy:** allow-listed auto-execution, circuit breakers, notifications
 - [ ] **Phase 5 — Hosted migration** (optional): Vercel + hosted Supabase + Render, same migrations
