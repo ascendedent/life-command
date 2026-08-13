@@ -136,10 +136,17 @@ export async function POST() {
         external_account_id: account.id,
         name: mode === "live" ? "Alpaca" : "Alpaca Paper",
         type: "investment",
-        subtype: "brokerage",
+        subtype: mode === "live" ? "brokerage" : "paper",
         mask: account.id.slice(-4),
-        current_balance: Number(account.equity),
-        available_balance: Number(account.cash),
+        // Paper money is not money. A paper account opens with $100,000 of it,
+        // and storing that as a balance would put six figures of imaginary
+        // assets into net worth, the agent's totals, and every report that sums
+        // this column — a dashboard lying by more than the owner's real net
+        // worth. The row exists to be an execution target, not a balance; the
+        // Investments page reads positions from the broker, which is the
+        // honest source for them either way.
+        current_balance: mode === "live" ? Number(account.equity) : 0,
+        available_balance: mode === "live" ? Number(account.cash) : 0,
       },
       { onConflict: "provider,external_account_id" }
     )
