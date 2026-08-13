@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Refuse to commit personal data.
+#
+# This repository is public. Real specifics kept leaking into comments and
+# commit messages because concrete examples explain a bug better than abstract
+# ones — a landlord's name, a third party on a P2P transfer, account masks,
+# actual balances. The examples should stay concrete and stop being real.
+#
+# Instance-specific names live in .pii-denylist, which is gitignored: the list
+# of things you must not publish is itself something you must not publish.
+#
+#   echo "Some Person" >> .pii-denylist
+#
+# Bypass for a genuine false positive:  git commit --no-verify
+set -uo pipefail
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+added=$(git diff --cached -U0 -- $staged | grep '^+' | grep -v '^+++' || true)
+[ -z "$added" ] && exit 0
+
+fail=0
+flag() { printf '  ✗ %s\n     %s\n' "$1" "$2"; fail=1; }
+
+# Secrets, matched with enough trailing key material to be a real key rather
+# than a mention of one. Matching the bare prefix flagged this hook's own
+# source and the README documenting it — a check that cries wolf on its own
+# definition is a check people learn to pass with --no-verify.
+secrets=$(grep -oE 'sk-ant-[A-Za-z0-9_-]{24,}|eyJhbGciOi[A-Za-z0-9_-]{24,}|GOCSPX-[A-Za-z0-9_-]{20,}' <<< "$added" || true)
+[ -n "$secrets" ] && flag "API key or token" "$(head -2 <<< "$secrets" | cut -c1-28 | tr '\n' ' ')"
+
+# Real email addresses. example.com and the placeholder domains are fine.
+emails=$(grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' <<< "$added" \
+  | grep -viE '@(example|test|localhost|acme)\.|@your-|noreply@|@sentry\.io' || true)
+[ -n "$emails" ] && flag "email address" "$(head -3 <<< "$emails" | tr '\n' ' ')"
+
+# Long digit runs: account, routing and transaction reference numbers.
+digits=$(grep -oE '\b[0-9]{9,}\b' <<< "$added" | grep -vE '^1[0-9]{12}$' || true)
+[ -n "$digits" ] && flag "9+ digit number (account/reference?)" "$(head -3 <<< "$digits" | tr '\n' ' ')"
+
+# Whatever this install has decided is personal.
+if [ -f .pii-denylist ]; then
+  while IFS= read -r term; do
+    [ -z "$term" ] && continue
+    case "$term" in \#*) continue ;; esac
+    if grep -qiF "$term" <<< "$added"; then
+      flag "denylisted term" "$term"
+    fi
+  done < .pii-denylist
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo
+  echo "Commit blocked: the staged changes look like personal data."
+  echo "This repository is public — use an invented example instead."
+  echo "If it is genuinely a false positive: git commit --no-verify"
+  exit 1
+fi
+exit 0

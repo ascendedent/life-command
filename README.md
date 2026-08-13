@@ -5,18 +5,28 @@ recommendations, and graduates from read-only analysis to human-approved
 execution to bounded autonomy. Full design in
 [ai-finance-platform-spec.md](./ai-finance-platform-spec.md).
 
-**Status: Phase 2 feature-complete (Aldyn Path A pending); Phase 3 next.**
-Local-only, zero hosting cost. Plaid production access is approved; OAuth
-institutions (Chase, Wells Fargo, BoA and friends) need a separate per-bank
-registration review before they can be linked. Gmail receipt ingestion is live
-on real mail.
+**Status: Phase 2 complete and running on real data. Phase 3a (approval-gated
+paper trading) is built and waiting on broker keys.** Local-only, zero hosting
+cost. Plaid production access is approved. Gmail receipt ingestion is live on
+real mail.
 
-> This is one person's self-hosted build, shared as-is under MIT. It assumes a
-> single owner and a local Supabase stack — there is no multi-tenancy anywhere
-> and none is planned. Everything instance-specific lives in `.env`; see
+> **License: [PolyForm Noncommercial 1.0.0](./LICENSE).** Use it, change it,
+> run it for your own household, share it — commercial use is not granted.
+> You may not sell it, resell it, or run it as a paid service. This is not an
+> OSI-approved open-source licence, and that is deliberate.
+
+> This is one person's self-hosted build, shared as-is. It assumes a single
+> owner and a local Supabase stack — there is no multi-tenancy anywhere and
+> none is planned. Everything instance-specific lives in `.env`; see
 > [Environment keys](#environment-keys). `docs/` carries the security and
 > data-retention policies Plaid's questionnaire asks for, as templates with
 > `<OWNER NAME>` placeholders — fill them in and generate your own PDFs.
+
+> **No personal data in this repository, ever.** A `pre-commit` hook
+> (`scripts/hooks/pre-commit`, wired via `core.hooksPath`) blocks staged
+> secrets, email addresses, long account/reference numbers, and anything listed
+> in a gitignored `.pii-denylist`. Examples in comments are invented on
+> purpose. See [Keeping personal data out](#keeping-personal-data-out).
 
 ## What exists now
 
@@ -107,7 +117,118 @@ OWNER_EMAIL=you@example.com node scripts/create-owner.mjs
 npm run build
 bash scripts/install-services.sh
 npm run svc:start
+
+git config core.hooksPath scripts/hooks   # PII guard; see below
 ```
+
+Then add your own keys to the root `.env` (Plaid, Anthropic, Google, ntfy) and
+re-run `npm run env:sync` — it preserves keys you added and rewrites only the
+ones derived from the running stack.
+
+## Plaid setup, end to end
+
+The part that takes longest is not code. Sandbox works in minutes; production
+took roughly two weeks of back-and-forth, almost all of it waiting on reviews.
+
+### 1. Sandbox — enough to build against
+
+1. Sign up at [dashboard.plaid.com](https://dashboard.plaid.com).
+2. **Team Settings → Keys** — copy `client_id` and the **Sandbox** secret.
+3. Put them in the root `.env`, then `npm run env:sync`:
+
+   ```
+   PLAID_CLIENT_ID=...
+   PLAID_SECRET=...
+   PLAID_ENV=sandbox
+   ```
+
+4. Restart (`npm run svc:restart`) and link anything from the app. Sandbox
+   credentials are `user_good` / `pass_good`.
+
+### 2. Production access
+
+**Dashboard → Request production access.** You are asked for a company, a
+product description, and expected volume. A personal, single-user, self-hosted
+tool is an accepted answer — say exactly that. Approval took a few days.
+
+Plaid then requires a **Compliance Center** app profile before any production
+key works:
+
+- **App name, description, logo** (a 1024×1024 PNG; a plain wordmark is fine).
+- **A public-facing URL** describing the app. Plaid checks this. A single page
+  on a domain you control is enough — it needs to describe what the app does,
+  what data it accesses and why, and link a privacy policy.
+- **Security questionnaire** — encryption at rest and in transit, access
+  control, retention. `docs/` in this repository carries the policy documents
+  that answer it, as templates with `<OWNER NAME>` placeholders. Fill them in,
+  export to PDF, upload. **Do not commit the filled-in PDFs** — `docs/*.pdf`
+  is gitignored for that reason.
+
+Once approved, swap the secret and env:
+
+```
+PLAID_SECRET=<production secret>
+PLAID_ENV=production
+```
+
+> **`npm run env:sync` is not optional here.** Next.js does not read the
+> repo-root `.env`, so the web app kept using sandbox while the workers were
+> already on production — link tokens minted against one environment and
+> exchanged against the other, with a confusing error. Sync, then restart both
+> services.
+
+### 3. OAuth institutions — the slow part
+
+Chase, Wells Fargo, Bank of America, Capital One and similar require Plaid to
+register **your specific application** with each bank before it can link.
+Submitted once from the dashboard, then reviewed **per institution**, and the
+reviews run in parallel. Budget **2–4 weeks** for the large banks. Nothing in
+your code changes; the institution simply cannot be linked until its review
+clears. Smaller banks and credit unions generally work immediately.
+
+### 4. Item limits — read this before linking
+
+The trial plan allows **10 live Items** (one Item = one set of credentials at
+one institution). **Unlinking does not return the slot.** Link deliberately.
+
+Two consequences worth knowing:
+
+- A card that two people can both see is **one** card. Linking it under each
+  person's login burns two slots and double-counts every balance and
+  transaction — Plaid issues a different `account_id` per Item, so the unique
+  constraint never fires. The exchange endpoint refuses duplicates and names
+  which household member already holds them.
+- Linking someone else's bank must be done as **them**: the link token is
+  scoped per household member, because Plaid keys its returning-user
+  experience off `client_user_id`. Set *Linking for* before opening Link, or
+  it opens straight into the owner's own Plaid session.
+
+### 5. What is actually stored
+
+Access tokens are encrypted with `APP_ENCRYPTION_KEY` before they touch the
+database, and are only ever decrypted inside the worker. The browser never
+receives a Plaid token or secret. Account identifiers are masked to the last
+four digits everywhere, including in anything sent to a model.
+
+## Keeping personal data out
+
+This repository is public and the app runs on real financial data, so the two
+must not meet.
+
+- **`scripts/hooks/pre-commit`** blocks staged secrets (`sk-ant-`, JWTs,
+  Google client secrets), email addresses, 9-or-more-digit numbers that look
+  like account or reference numbers, and any term in `.pii-denylist`.
+- **Enable it on a fresh clone:** `git config core.hooksPath scripts/hooks`
+- **`.pii-denylist`** is gitignored — the list of things you must not publish
+  is itself something you must not publish. One term per line:
+
+  ```
+  echo "Some Landlord LLC" >> .pii-denylist
+  ```
+
+- Examples in comments are **invented**. Concrete examples explain a bug far
+  better than abstract ones, so they stay concrete and stop being real.
+- Genuine false positive: `git commit --no-verify`.
 
 ## Key scripts
 
@@ -241,7 +362,7 @@ Alpaca, Kalshi) to root `.env` — `sync-env` preserves unmanaged lines.
 
 - [x] **Phase 0 — Foundation:** local stack, schema, auth, worker skeleton, reboot persistence
 - [x] **Phase 1 — Read everything:** Plaid Link + sync (encrypted tokens), categorization pipeline v1, recurring detection, business layer v1, net-worth snapshots, SI section v1 — *sandbox-verified; real-institution acceptance pending Trial approval*
-- [ ] **Phase 2 — The brain (read-only):** *feature-complete except Aldyn Path A*
+- [ ] **Phase 2 — The brain (read-only):** *feature-complete except Aldyn ([getaldyn.com](https://getaldyn.com)) Path A*
   - [x] Budgets (category + flex, rollovers, 6-month auto-fill)
   - [x] Agent worker v1 + Approval Queue (advisory) + Agent control page
   - [x] Gmail receipt ingestion (multi-mailbox, label mapping, LLM parse), anticipation engine, scored reconciliation, vendor watchlist
@@ -249,12 +370,22 @@ Alpaca, Kalshi) to root `.env` — `sync-env` preserves unmanaged lines.
   - [x] Goals wizard + `goal_links` semantic mapping + contribution matching + pace math
   - [x] LLM categorization enrichment + business suggestion engine
   - [x] Recap engine (Stage 1 deterministic math → Stage 2 LLM scoring/narrative) + subscription review
-  - [ ] Aldyn Receipts API (Path A) — replaces Gmail OAuth once live (blocked on the Aldyn-side build)
+  - [ ] Aldyn ([getaldyn.com](https://getaldyn.com)) Receipts API (Path A) — replaces Gmail OAuth
+        once live (blocked on the Aldyn-side build)
 - [ ] **Phase 3 — Human-approved execution:** Alpaca paper → Kalshi demo → transfers, executor guardrails
 - [ ] **Phase 4 — Bounded autonomy:** allow-listed auto-execution, circuit breakers, notifications
 - [ ] **Phase 5 — Hosted migration** (optional): Vercel + hosted Supabase + Render, same migrations
 - [ ] **Phase 5 — Desktop app packaging:** Tauri shell, approval-badge count on the tray icon, native notifications wired to `notification_rules` (tray v0 + launcher + installable PWA manifest exist now)
 - [ ] **Settings: per-function model selector** — choose the Claude model per LLM function (agent analysis, categorization enrichment, recap scoring, subscription review) from a settings UI; currently env-based (`AGENT_MODEL`, default `claude-sonnet-5`)
+
+## Aldyn
+
+**Aldyn ([getaldyn.com](https://getaldyn.com))** is a separate receipt-capture
+product by the same author. This platform can take receipts from it directly
+(Path A) instead of scraping Gmail (Path B), which removes the OAuth
+dependency and gets structured line items rather than parsed HTML. Path A is
+optional and not required to run anything here — Gmail ingestion works
+standalone, and everything in this repository is written against Path B.
 
 ## Environment keys
 
@@ -266,12 +397,27 @@ what the web app and workers need.
 | `SUPABASE_*`, `DATABASE_URL` | local stack | managed by `env:sync` |
 | `APP_ENCRYPTION_KEY` | Plaid/Gmail token encryption | generated at setup |
 | `SI_API_TOKEN` | `POST /api/si/entries` | generated at setup |
-| `PLAID_CLIENT_ID` / `PLAID_SECRET` / `PLAID_ENV` | Phase 1 banking | set (sandbox) |
+| `PLAID_CLIENT_ID` / `PLAID_SECRET` / `PLAID_ENV` | banking aggregation | set (production) |
 | `ANTHROPIC_API_KEY` | agent + receipt parsing | set |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Gmail receipts | set |
 | `AGENT_MODEL` / `RECEIPT_MODEL` / `ENRICH_MODEL` / `RECAP_MODEL` | per-function model overrides (default `claude-sonnet-5`) | optional |
-| `NTFY_TOPIC` | push notifications | optional |
-| `ALPACA_*` / `KALSHI_*` | Phase 3 execution | not yet needed |
+| `NTFY_TOPIC` | push notifications (recaps, receipts, watchlist) | optional |
+| `ALPACA_KEY_ID` / `ALPACA_SECRET_KEY` | Phase 3a paper trading | needed to execute |
+| `KALSHI_*` | Phase 3b | not yet needed |
+
+`NTFY_TOPIC` is a credential, not a name: on ntfy.sh anyone who knows the topic
+string reads every notification it carries. Generate a random one and treat it
+like a password.
+
+```
+NTFY_TOPIC=lifecmd-$(openssl rand -hex 16)
+```
+
+Nothing executes a trade until the caps in `agent_config` are raised from their
+defaults of `0` — `max_txn_amount`, `max_daily_amount`, `max_position_size`,
+`max_open_positions`, and `allowed_action_types` must include `trade`. A fresh
+install refuses every order, which is the intended starting state.
+`agent_config.execution_mode` defaults to `paper` and must be changed by hand.
 
 Google OAuth setup: Cloud Console → enable Gmail API → OAuth consent screen
 (External, published unverified so refresh tokens don't expire weekly) →

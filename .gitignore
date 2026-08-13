@@ -49,3 +49,6 @@ si-inbox/*
 # the workspace to resolve its packages, but they are not part of the build.
 *.bak
 scratch/
+
+# The denylist of personal terms is itself personal — never commit it.
+.pii-denylist
