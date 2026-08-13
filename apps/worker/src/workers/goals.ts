@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit } from "@finance/shared";
+import { audit, fetchAll} from "@finance/shared";
 import {
   dedupeMatches,
   matchContributions,
@@ -53,14 +53,16 @@ export async function matchGoalContributions(db: SupabaseClient): Promise<number
 
   const [{ data: txnRows }, { data: accounts }, { data: liabs }, { data: cats }, { data: tags }] =
     await Promise.all([
-    db
-      .from("transactions")
-      .select("id, date, amount, merchant, merchant_clean, category_id, account_id, transaction_tags (tag_id)")
-      .gte("date", from)
-      // hidden=false counts each dollar once — a split hides the parent.
-      .eq("hidden", false)
-      .order("date", { ascending: false })
-      .limit(20000),
+    fetchAll<any>(() =>
+      db
+        .from("transactions")
+        .select("id, date, amount, merchant, merchant_clean, category_id, account_id, transaction_tags (tag_id)")
+        .gte("date", from)
+        // hidden=false counts each dollar once — a split hides the parent.
+        .eq("hidden", false)
+        .order("date", { ascending: false })
+        .order("id")
+    ).then((data) => ({ data })),
     db.from("accounts").select("id, name, current_balance"),
     db.from("liabilities").select("id, account_id"),
     db.from("categories").select("id, name"),

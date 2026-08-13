@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit, looksLikeMoneyMovement } from "@finance/shared";
+import { audit, fetchAll, looksLikeMoneyMovement } from "@finance/shared";
 
 // Recurring detection v1 (spec Phase 1): score merchant + cadence + amount
 // regularity over the trailing 400 days; flag price changes and missed
@@ -84,14 +84,20 @@ export async function detectRecurring(db: SupabaseClient): Promise<void> {
   const cutoff = new Date(Date.now() - 400 * 86400_000).toISOString().slice(0, 10);
   const excluded = await transferCategoryIds(db);
   const notSubscribable = await nonSubscriptionCategoryIds(db);
-  const { data: txns } = await db
-    .from("transactions")
-    .select("id, merchant, merchant_clean, amount, date, account_id, category_id, parent_transaction_id")
-    .gte("date", cutoff)
-    .gt("amount", 0) // outflows only
-    .eq("hidden", false)
-    .order("date");
-  if (!txns?.length) return;
+  // Paged, and ordered with `id` as a tiebreaker so the pages line up. Read
+  // unpaged this returned the oldest 1,000 of 1,459 matching rows and the
+  // detector concluded every bill had stopped in May.
+  const txns = await fetchAll<TxnLite>(() =>
+    db
+      .from("transactions")
+      .select("id, merchant, merchant_clean, amount, date, account_id, category_id, parent_transaction_id")
+      .gte("date", cutoff)
+      .gt("amount", 0) // outflows only
+      .eq("hidden", false)
+      .order("date")
+      .order("id")
+  );
+  if (!txns.length) return;
 
   // A split charge reaches here as its children, because the parent is hidden.
   // Recurring detection wants the whole charge — a $90 grocery run split into
@@ -99,7 +105,7 @@ export async function detectRecurring(db: SupabaseClient): Promise<void> {
   // of the same parent are recombined before anything is measured.
   const bySplit = new Map<string, TxnLite>();
   const rows: TxnLite[] = [];
-  for (const t of txns as TxnLite[]) {
+  for (const t of txns) {
     if (!t.parent_transaction_id) {
       rows.push(t);
       continue;
@@ -125,6 +131,7 @@ export async function detectRecurring(db: SupabaseClient): Promise<void> {
   }
 
   let found = 0;
+  const touched = new Set<string>();
   for (const [key, list] of groups) {
     if (list.length < 3) continue;
     const dates = list.map((t) => new Date(t.date).getTime());
@@ -189,11 +196,87 @@ export async function detectRecurring(db: SupabaseClient): Promise<void> {
     } else {
       await db.from("recurring_items").insert(row);
     }
+    touched.add(key);
     found++;
   }
 
-  console.log(`[recurring] ${found} recurring items detected/updated`);
+  const reconciled = await reconcileUntouched(db, rows, touched);
+
+  console.log(
+    `[recurring] ${found} recurring items detected/updated, ${reconciled} stale items reconciled`
+  );
   await audit(db, "system", "recurring_detected", "recurring_items", undefined, {
     count: found,
+    reconciled,
   });
+}
+
+
+const CADENCE_DAYS: Record<string, number> = {
+  weekly: 7,
+  monthly: 30,
+  annual: 365,
+  custom: 30,
+};
+
+/**
+ * Keep an item's idea of "last seen" true even after its pattern stops being
+ * regular.
+ *
+ * A merchant that becomes irregular — a phone bill that turns into three small
+ * charges a month instead of one predictable one — stops qualifying above, and
+ * the loop simply skips it. The row it left behind is then frozen forever at
+ * whatever it said the last time the pattern held: due in June, last seen in
+ * May, status `missed`, while the merchant carries on charging every week.
+ *
+ * Nothing complained, because a stale row is a perfectly valid row. It surfaced
+ * only when the cash floors started reserving those obligations as overdue and
+ * quietly held back money for bills that had in fact been paid three months
+ * earlier. An item that is wrong about the past will be wrong about the future,
+ * and something downstream will believe it.
+ */
+async function reconcileUntouched(
+  db: SupabaseClient,
+  rows: TxnLite[],
+  touched: Set<string>
+): Promise<number> {
+  const latest = new Map<string, TxnLite>();
+  for (const t of rows) {
+    const name = t.merchant_clean ?? t.merchant;
+    if (!name) continue;
+    const key = `${name}::${t.account_id}`;
+    const cur = latest.get(key);
+    if (!cur || t.date > cur.date) latest.set(key, t);
+  }
+
+  const { data: items } = await db
+    .from("recurring_items")
+    .select("id, merchant, account_id, cadence, status, next_expected_date, last_seen_txn_id")
+    .in("status", ["active", "price_changed", "missed"]);
+
+  let n = 0;
+  for (const item of items ?? []) {
+    const key = `${item.merchant}::${item.account_id}`;
+    if (touched.has(key)) continue;
+    const seen = latest.get(key);
+    if (!seen) continue; // genuinely nothing since: `missed` is the truth
+    if (seen.id === item.last_seen_txn_id) continue;
+
+    const gap = CADENCE_DAYS[item.cadence ?? "monthly"] ?? 30;
+    const next = new Date(new Date(seen.date).getTime() + gap * 86400_000);
+    const daysOverdue = (Date.now() - next.getTime()) / 86400_000;
+    await db
+      .from("recurring_items")
+      .update({
+        last_seen_txn_id: seen.id,
+        next_expected_date: next.toISOString().slice(0, 10),
+        // The amount is deliberately not rewritten. The pattern that produced
+        // it no longer holds, and one irregular charge is not a better estimate
+        // than the median of the run that did.
+        status: daysOverdue > Math.max(5, gap * 0.5) ? "missed" : "active",
+      })
+      .eq("id", item.id);
+    n++;
+  }
+  return n;
 }

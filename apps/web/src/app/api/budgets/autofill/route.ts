@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/api-auth";
-import { planBudgetLines } from "@finance/shared";
+import { fetchAll, planBudgetLines } from "@finance/shared";
 
 // Creates (or refills) a month's budget from trailing 6-month category
 // averages (spec §1.6 Monarch parity). Also computes rollover_in for
@@ -26,12 +26,18 @@ export async function POST(request: Request) {
       .from("categories")
       .select("id, is_rollover, exclude_from_budget, is_active, category_groups (type)")
       .eq("is_active", true),
-    supabase
-      .from("transactions")
-      .select("category_id, amount, date")
-      .gte("date", historyStart.toISOString().slice(0, 10))
-      .lt("date", month)
-      .eq("hidden", false),  // splits: parent is hidden, children counted
+    // Paged: six months of history is well past the 1,000-row response cap, and
+    // an auto-filled budget built from a truncated history is quietly low.
+    fetchAll<{ category_id: string | null; amount: number; date: string }>(() =>
+      supabase
+        .from("transactions")
+        .select("category_id, amount, date, id")
+        .gte("date", historyStart.toISOString().slice(0, 10))
+        .lt("date", month)
+        .eq("hidden", false)  // splits: parent is hidden, children counted
+        .order("date")
+        .order("id")
+    ).then((data) => ({ data })),
   ]);
 
   const budgetable = (cats ?? []).filter((c) => {

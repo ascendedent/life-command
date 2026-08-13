@@ -9,6 +9,7 @@
 // at the bottom, which does no deciding.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { fetchAll } from "./db";
 
 export type FloorKind =
   | "liquid_minimum"
@@ -48,12 +49,14 @@ export interface FloorState {
   /** Trailing average monthly expense, for a floor stated in months. */
   monthlyExpenses: number;
   /**
-   * How many recurring items exist versus how many carry a due date. A
-   * committed-cash reservation computed from zero dated obligations is not a
-   * reservation, and the difference has to be visible rather than inferred
-   * from a suspiciously round $0.
+   * How many recurring items exist, how many carry a due date, and how many
+   * are too far past due to be believed. A committed-cash reservation computed
+   * from zero dated obligations is not a reservation, and neither number can be
+   * inferred from a suspiciously round $0.
    */
-  obligationCoverage: { dated: number; total: number };
+  obligationCoverage: { dated: number; total: number; stale: number };
+  /** The spread behind `monthlyExpenses`, so a floor can be sanity-checked. */
+  expenseMonths: { month: string; total: number }[];
 }
 
 /** A proposed movement. Negative leaves the account, positive arrives. */
@@ -97,6 +100,17 @@ const MAX_STALENESS_HOURS = 24;
 /** Recurring statuses that still represent money owed. */
 const OWED_STATUSES = ["active", "price_changed", "missed"];
 
+/**
+ * How far into the past a due date may be and still count as owed.
+ *
+ * A bill due three days ago is very much owed. One due a hundred days ago that
+ * has never been seen since is not overdue — it is evidence that whatever
+ * tracks it lost the thread, and reserving cash against it forever is the
+ * expensive kind of caution. This install had eight such items, every one of
+ * them stale rather than unpaid, quietly holding back real money.
+ */
+const PAST_DUE_GRACE_DAYS = 45;
+
 const hoursOld = (iso: string | null, now: Date): number =>
   iso == null ? Number.POSITIVE_INFINITY : (now.getTime() - Date.parse(iso)) / 3_600_000;
 
@@ -126,11 +140,15 @@ export function evaluateFloors(
 
   const committedFor = (accountIds: Set<string> | null, horizon: number): number => {
     const cutoff = new Date(state.asOf.getTime() + horizon * 86400_000);
+    const notBefore = state.asOf.getTime() - PAST_DUE_GRACE_DAYS * 86400_000;
     return state.committed
-      // Past due dates are included deliberately: an obligation that came due
-      // last week and has not been seen is more certainly owed than one due
-      // next week, not less.
-      .filter((c) => Date.parse(c.due) <= cutoff.getTime())
+      // Recently past due counts: an obligation that came due last week and has
+      // not been seen is more certainly owed than one due next week, not less.
+      // Long past due does not — see PAST_DUE_GRACE_DAYS.
+      .filter((c) => {
+        const due = Date.parse(c.due);
+        return due <= cutoff.getTime() && due >= notBefore;
+      })
       // An obligation with no account named still has to come from somewhere,
       // so it counts against the household total but not against one account.
       .filter((c) => (accountIds ? c.account_id != null && accountIds.has(c.account_id) : true))
@@ -267,7 +285,7 @@ export async function loadFloorState(
   now = new Date()
 ): Promise<FloorState> {
   const horizonEnd = new Date(now.getTime() + 90 * 86400_000).toISOString().slice(0, 10);
-  const [{ data: accounts }, { data: recurring }, { data: allRecurring }, { data: spend }] =
+  const [{ data: accounts }, { data: recurring }, { data: allRecurring }, spend] =
     await Promise.all([
       db.from("accounts").select("id, name, mask, type, current_balance, available_balance, updated_at"),
       // Everything except cancelled. A bill this platform flagged as `missed`
@@ -281,24 +299,55 @@ export async function loadFloorState(
         .not("next_expected_date", "is", null)
         .lte("next_expected_date", horizonEnd),
       db.from("recurring_items").select("id, next_expected_date").in("status", OWED_STATUSES),
-      db
-        .from("transactions")
-        .select("amount, categories (category_groups (type))")
-        .gte("date", new Date(now.getTime() - 180 * 86400_000).toISOString().slice(0, 10))
-        .eq("hidden", false)
-        .gt("amount", 0)
-        .limit(5000),
+      // Paged: a `.limit(5000)` here returned 1,000 rows and a monthly expense
+      // figure computed from a fifth of the year.
+      fetchAll<{ date: string; amount: number; categories: unknown }>(() =>
+        db
+          .from("transactions")
+          .select("date, amount, categories (category_groups (type))")
+          .gte("date", new Date(now.getTime() - 180 * 86400_000).toISOString().slice(0, 10))
+          .eq("hidden", false)
+          .gt("amount", 0)
+          .order("date")
+          .order("id")
+      ),
     ]);
 
-  // Six months of spending, transfers excluded — the same dollar moving between
-  // the owner's own accounts is not an expense a cash floor should reserve for.
-  const expenses = (spend ?? []).filter(
+  // Transfers excluded: the same dollar moving between the owner's own accounts
+  // is not an expense a cash floor should reserve for.
+  const expenses = spend.filter(
     (t) =>
       (t.categories as unknown as { category_groups?: { type: string } | null } | null)
         ?.category_groups?.type !== "transfer"
   );
-  const monthlyExpenses =
-    Math.round((expenses.reduce((s, t) => s + Number(t.amount), 0) / 6) * 100) / 100;
+
+  // Whole calendar months only, and the median of them rather than the mean.
+  //
+  // Dividing a 180-day total by six mixes two partial months into the average
+  // and calls the result monthly spending. And a mean over this owner's real
+  // spread — $1,634 in the quietest month against $15,837 in the month they
+  // moved house — is dragged around by one-off events, which is the wrong
+  // property for a number that sets a floor. A floor that jumps because you
+  // moved once is a floor that misleads.
+  const byMonth = new Map<string, number>();
+  for (const t of expenses) {
+    const m = String((t as { date?: string }).date ?? "").slice(0, 7);
+    if (!m) continue;
+    byMonth.set(m, (byMonth.get(m) ?? 0) + Number(t.amount));
+  }
+  const thisMonth = now.toISOString().slice(0, 7);
+  const earliest = [...byMonth.keys()].sort()[0];
+  const complete = [...byMonth.entries()]
+    .filter(([m]) => m !== thisMonth && m !== earliest)
+    .sort();
+  const sorted = complete.map(([, v]) => v).sort((a, b) => a - b);
+  const monthlyExpenses = sorted.length
+    ? Math.round(
+        (sorted.length % 2
+          ? sorted[(sorted.length - 1) / 2]
+          : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2) * 100
+      ) / 100
+    : 0;
 
   return {
     asOf: now,
@@ -320,6 +369,16 @@ export async function loadFloorState(
     obligationCoverage: {
       dated: (allRecurring ?? []).filter((r) => r.next_expected_date).length,
       total: (allRecurring ?? []).length,
+      stale: (allRecurring ?? []).filter(
+        (r) =>
+          r.next_expected_date &&
+          Date.parse(r.next_expected_date as string) <
+            now.getTime() - PAST_DUE_GRACE_DAYS * 86400_000
+      ).length,
     },
+    expenseMonths: complete.map(([month, total]) => ({
+      month,
+      total: Math.round(total * 100) / 100,
+    })),
   };
 }

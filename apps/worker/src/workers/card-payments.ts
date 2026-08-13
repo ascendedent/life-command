@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit } from "@finance/shared";
+import { audit, fetchAll} from "@finance/shared";
 
 /**
  * Tell card payments apart from refunds.
@@ -56,12 +56,15 @@ export async function detectCardPayments(
   );
   if (!creditIds.size || !fundingIds.size) return [];
 
-  const { data: rows } = await db
-    .from("transactions")
-    .select("id, account_id, date, amount, merchant, category_id, category_source")
-    .gte("date", since)
-    .eq("hidden", false)
-    .limit(20000);
+  const rows = await fetchAll<any>(() =>
+    db
+      .from("transactions")
+      .select("id, account_id, date, amount, merchant, category_id, category_source")
+      .gte("date", since)
+      .eq("hidden", false)
+      .order("date")
+      .order("id")
+  );
 
   // Inflows on a credit card: candidate payments (or refunds).
   const inflows = (rows ?? []).filter(

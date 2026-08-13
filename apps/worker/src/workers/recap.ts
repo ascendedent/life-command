@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { audit } from "@finance/shared";
+import { audit, fetchAll} from "@finance/shared";
 import { notify } from "./gmail.js";
 import { indexCategories, type CategoryMeta, type ReportTxn } from "@finance/shared/src/reports";
 import {
@@ -97,15 +97,20 @@ Tone: direct, specific, no hedging or motivational filler. The owner reads this 
 Adjustments must be concrete enough to act on this week, and each must be grounded in a specific fact.`;
 
 async function loadTxns(db: SupabaseClient, w: Window): Promise<ReportTxn[]> {
-  const { data } = await db
-    .from("transactions")
-    .select("id, date, amount, merchant, merchant_clean, category_id, account_id, is_business, business_entity, pending")
-    // hidden=false counts each dollar once (a split hides its parent)
-    .eq("hidden", false)
-    .gte("date", w.start)
-    .lte("date", w.end)
-    .limit(10000);
-  return (data ?? []).map((t: any) => ({ ...t, amount: Number(t.amount) }));
+  // Paged. `.limit(10000)` returned 1,000 rows, silently, and every figure in
+  // the recap is a sum over these.
+  const data = await fetchAll<any>(() =>
+    db
+      .from("transactions")
+      .select("id, date, amount, merchant, merchant_clean, category_id, account_id, is_business, business_entity, pending")
+      // hidden=false counts each dollar once (a split hides its parent)
+      .eq("hidden", false)
+      .gte("date", w.start)
+      .lte("date", w.end)
+      .order("date")
+      .order("id")
+  );
+  return data.map((t: any) => ({ ...t, amount: Number(t.amount) }));
 }
 
 /** Stage 1: every number the recap may contain, computed by code. */
@@ -182,14 +187,16 @@ export async function buildFacts(
 
   const spentByCategory = new Map<string, number>();
   if (budget) {
-    const { data: monthTxns } = await db
-      .from("transactions")
-      .select("category_id, amount")
-      .gte("date", monthKey)
-      .lte("date", window.end)
-      .eq("hidden", false)
-      .limit(10000);
-    for (const t of monthTxns ?? []) {
+    const monthTxns = await fetchAll<{ category_id: string | null; amount: number }>(() =>
+      db
+        .from("transactions")
+        .select("category_id, amount, id")
+        .gte("date", monthKey)
+        .lte("date", window.end)
+        .eq("hidden", false)
+        .order("id")
+    );
+    for (const t of monthTxns) {
       const amount = Number(t.amount);
       if (!t.category_id || amount <= 0) continue;
       spentByCategory.set(t.category_id, (spentByCategory.get(t.category_id) ?? 0) + amount);
@@ -236,16 +243,18 @@ export async function buildFacts(
   // Interest actually charged in the window, per account. This is the only
   // honest source: a statement paid in full inside its grace period costs
   // nothing, and no formula over balance and APR can know that.
-  const { data: interestRows } = await db
-    .from("transactions")
-    .select("id, account_id, amount, merchant, description, categories (name)")
-    .gte("date", window.start)
-    .lte("date", window.end)
-    .gt("amount", 0)
-    .eq("hidden", false)
-    .limit(5000);
+  const interestRows = await fetchAll<any>(() =>
+    db
+      .from("transactions")
+      .select("id, account_id, amount, merchant, description, categories (name)")
+      .gte("date", window.start)
+      .lte("date", window.end)
+      .gt("amount", 0)
+      .eq("hidden", false)
+      .order("id")
+  );
   const interestByAccount = new Map<string, { total: number; ids: string[] }>();
-  for (const r of interestRows ?? []) {
+  for (const r of interestRows) {
     const name = (r.categories as unknown as { name: string } | null)?.name ?? "";
     const text = `${r.merchant ?? ""} ${r.description ?? ""}`;
     const isInterest =
