@@ -51,6 +51,12 @@ const mirror = [
   "SI_API_TOKEN",
   "GOOGLE_CLIENT_ID",
   "GOOGLE_CLIENT_SECRET",
+  // The Execution card asks the broker who it is and whether the keys work, so
+  // the web process needs them too. The worker reads the root .env directly and
+  // would have been fine either way — which is how this hides: trading looks
+  // configured everywhere except the one page that reports whether it is.
+  "ALPACA_KEY_ID",
+  "ALPACA_SECRET_KEY",
 ];
 writeFileSync(
   resolve(root, "apps/web/.env.local"),
