@@ -15,8 +15,24 @@ export async function PATCH(
   const patch: Record<string, unknown> = {};
   if (typeof body.is_business === "boolean") patch.is_business = body.is_business;
   if ("business_entity" in body) patch.business_entity = body.business_entity || null;
+  if (typeof body.is_agent_controlled === "boolean") {
+    patch.is_agent_controlled = body.is_agent_controlled;
+  }
   if (Object.keys(patch).length === 0) {
     return NextResponse.json({ error: "nothing to update" }, { status: 400 });
+  }
+
+  // Exactly one account may be agent-controlled, so this is a radio and not a
+  // checkbox: naming one unnames the rest. Two flagged accounts disable trading
+  // entirely — the agent must never choose which account an order lands in —
+  // and a UI that can reach that state is a UI that turns trading off by
+  // accident and gives no hint why.
+  if (patch.is_agent_controlled === true) {
+    await supabase
+      .from("accounts")
+      .update({ is_agent_controlled: false })
+      .eq("is_agent_controlled", true)
+      .neq("id", params.id);
   }
 
   const { error } = await supabase.from("accounts").update(patch).eq("id", params.id);

@@ -8,12 +8,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ExecutionReadiness } from "@/components/agent/execution-readiness";
 import { cn } from "@/lib/utils";
 
 const LEVELS = [
   { level: 0, name: "Read-only", desc: "Analysis and alerts only. Nothing else." },
   { level: 1, name: "Recommend", desc: "Structured recommendations queue for your review. Still nothing executes." },
-  { level: 2, name: "Approve-to-execute", desc: "Approved recommendations execute via guardrailed executor. (Phase 3)" },
+  { level: 2, name: "Approve-to-execute", desc: "The agent proposes trades and an approved one executes, re-checked against the guardrails at that moment." },
   { level: 3, name: "Bounded autonomy", desc: "Allow-listed types under caps auto-execute on the agent sub-account. (Phase 4)" },
 ];
 
@@ -42,6 +43,9 @@ export default function AgentPage() {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [breakers, setBreakers] = useState<{ id: string; at: string; rule: string }[]>([]);
+  // The readiness card reads the same row the autonomy buttons write, so it has
+  // to be told when one of them changes rather than discovering it on reload.
+  const [configVersion, setConfigVersion] = useState(0);
   // In-flight state belongs to the worker, not to this page — read it from
   // the job queue so it survives navigation and is shared with every tab.
   const { isRunning, refresh: refreshJobs } = useActiveJobs();
@@ -81,6 +85,7 @@ export default function AgentPage() {
       entity: "agent_config",
       detail: { level },
     });
+    setConfigVersion((v) => v + 1);
     load();
   }
 
@@ -92,6 +97,7 @@ export default function AgentPage() {
       entity: "agent_config",
       detail: { [field]: value },
     });
+    setConfigVersion((v) => v + 1);
     load();
   }
 
@@ -135,7 +141,10 @@ export default function AgentPage() {
         </CardHeader>
         <CardContent className="space-y-2">
           {LEVELS.map((l) => {
-            const disabled = l.level >= 2; // unlocked in Phases 3-4
+            // Level 2 is live: the executor and its guardrails exist. Level 3
+            // is not — auto-execution needs the circuit breakers first, and
+            // offering it before they work would be offering a lie.
+            const disabled = l.level >= 3;
             const active = config?.autonomy_level === l.level;
             return (
               <button
@@ -161,7 +170,7 @@ export default function AgentPage() {
                     {l.name}
                     {disabled && (
                       <Badge variant="secondary" className="ml-2">
-                        Phase {l.level + 1}
+                        Phase 4
                       </Badge>
                     )}
                   </span>
@@ -214,6 +223,8 @@ export default function AgentPage() {
           )}
         </CardContent>
       </Card>
+
+      <ExecutionReadiness key={configVersion} onChanged={load} />
 
       <Card>
         <CardHeader>

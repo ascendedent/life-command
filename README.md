@@ -467,19 +467,24 @@ NTFY_TOPIC=lifecmd-$(openssl rand -hex 16)
 ### Turning on paper trading
 
 A fresh install refuses every order, and that is the intended starting state.
-Trading is opt-in at several independent points, each checked against the world
-rather than asserted — turning on all but one of them does nothing:
+Trading is opt-in at five independent points, each checked against the world
+rather than asserted — turning on four of them does nothing. **The Execution
+card on `/agent` lists all five and says which one is off**, since an empty
+approval queue looks identical either way.
 
 1. `ALPACA_KEY_ID` and `ALPACA_SECRET_KEY` in root `.env`, then
-   `npm run env:sync`.
-2. `agent_config.allowed_action_types` must contain `trade`.
-3. `agent_config.autonomy_level` — `1` lets the agent *propose* trades, `2`
-   lets an approved one *execute*. `0` is read-only and disarms both.
-4. The caps, all defaulting to `0`: `max_txn_amount`, `max_daily_amount`,
-   `max_position_size`, `max_open_positions`. A cap of zero refuses everything.
-5. Exactly one account flagged `is_agent_controlled`. Zero means no trading; two
-   or more also means no trading, because the agent must never pick between
-   accounts — code stamps the account into every order, the model never chooses.
+   `npm run env:sync`. This one is the only step that is not in the UI —
+   secrets stay in the environment.
+2. Allow-list `trade` (`agent_config.allowed_action_types`).
+3. Autonomy level — `1` lets the agent *propose* trades, `2` lets an approved
+   one *execute*. `0` is read-only and disarms both.
+4. The caps, all defaulting to `0`: per-transaction, daily, per-position, and
+   open positions. A cap of zero refuses everything.
+5. One agent-controlled account. Alpaca is not a bank Plaid aggregates, so
+   *Create it from the broker* makes the row by asking Alpaca who it is. Zero
+   flagged accounts means no trading; two or more also means no trading,
+   because the agent must never pick between accounts — code stamps the account
+   into every order and the model never chooses. Naming one unnames the rest.
 
 `agent_config.execution_mode` defaults to `paper` and must be changed by hand;
 the spec gates `live` on 30 days of clean paper trading.
