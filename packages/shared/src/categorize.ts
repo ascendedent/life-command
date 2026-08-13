@@ -63,17 +63,41 @@ export interface CategorizeResult {
   matched_rule_id: string | null;
 }
 
-/** Normalize a raw bank descriptor into a stable lookup key. */
+/**
+ * Legal-entity suffixes, which name a company's incorporation rather than the
+ * company. A card statement may read "Supabase" one month and "Supabase Pte.
+ * Ltd." the next, and treating those as two merchants means two recurring
+ * items, two merchant_map entries, and a subscription the platform insists is
+ * unregistered while showing it registered on the next screen.
+ */
+const LEGAL_SUFFIXES = new Set([
+  "PTE", "LTD", "LIMITED", "INC", "INCORPORATED", "LLC", "LLP", "PLC",
+  "CORP", "CORPORATION", "CO", "COMPANY", "GMBH", "AG", "PTY", "BV", "NV",
+  "SA", "SAS", "SARL", "SRL", "SPA", "AB", "OY", "PBC", "LP",
+]);
+
+/**
+ * Normalize a raw bank descriptor into a stable lookup key.
+ *
+ * Suffixes are stripped only from the end, and never all the way to nothing —
+ * a merchant genuinely called "CO" keeps its name rather than becoming the
+ * empty string, which would match everything.
+ */
 export function merchantKey(raw: string | null | undefined): string {
   if (!raw) return "";
-  return raw
+  const base = raw
     .toUpperCase()
     .replace(/[#*]\s*\d+/g, " ") // store numbers: "#3471"
     .replace(/\b\d{4,}\b/g, " ") // long digit runs (ids, phone fragments)
     .replace(/[^A-Z0-9& ]+/g, " ")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 40);
+    .trim();
+
+  const tokens = base.split(" ").filter(Boolean);
+  while (tokens.length > 1 && LEGAL_SUFFIXES.has(tokens[tokens.length - 1])) {
+    tokens.pop();
+  }
+  return tokens.join(" ").slice(0, 40);
 }
 
 /**
