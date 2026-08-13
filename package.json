@@ -2,7 +2,7 @@
   "name": "finance-dashboard",
   "private": true,
   "version": "0.1.0",
-  "description": "Personal AI finance platform — local-first build",
+  "description": "Personal AI finance platform \u2014 local-first build",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -19,13 +19,13 @@
     "db:types": "supabase gen types typescript --local > packages/shared/src/database.types.ts",
     "env:sync": "node scripts/sync-env.mjs",
     "owner:create": "node scripts/create-owner.mjs",
-    "svc:install": "bash scripts/install-services.sh",
-    "svc:start": "systemctl --user start finance-supabase finance-web finance-workers",
-    "svc:stop": "systemctl --user stop finance-web finance-workers",
-    "svc:restart": "systemctl --user restart finance-web finance-workers",
-    "svc:status": "systemctl --user --no-pager status finance-supabase finance-web finance-workers",
-    "svc:logs": "journalctl --user -f -u finance-web -u finance-workers",
-    "up": "bash scripts/startup.sh"
+    "svc:install": "node scripts/svc.mjs install",
+    "svc:start": "node scripts/svc.mjs start",
+    "svc:stop": "node scripts/svc.mjs stop",
+    "svc:restart": "node scripts/svc.mjs restart",
+    "svc:status": "node scripts/svc.mjs status",
+    "svc:logs": "node scripts/svc.mjs logs",
+    "up": "node scripts/svc.mjs up"
   },
   "devDependencies": {
     "supabase": "^2.0.0",
