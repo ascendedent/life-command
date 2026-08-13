@@ -6,6 +6,7 @@ import { audit } from "@finance/shared";
 // The grounding gate lives with the recap because that is where it was first
 // needed; it is not recap-specific and the agent is held to the same rule.
 import { verifyGrounding, verifyAccountReferences } from "@finance/shared/src/recap";
+import { attributionFrom, attributionMonthOf, isShiftableIncome } from "@finance/shared";
 
 // Agent worker v1 (spec Phase 2, §8 prompt contract): assembles a derived
 // financial snapshot, calls Claude, and writes ADVISORY recommendations only —
@@ -64,6 +65,7 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
     { data: config },
     { data: lastRecs },
     { data: netWorth },
+    { data: settingsRow },
   ] = await Promise.all([
     db.from("accounts").select("name, type, subtype, mask, current_balance, is_business, business_entity"),
     db
@@ -86,6 +88,11 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
       .order("created_at", { ascending: false })
       .limit(10),
     db.from("net_worth_snapshots").select("date, total").order("date", { ascending: false }).limit(30),
+    db
+      .from("app_settings")
+      .select("income_attribution, income_shift_from_day")
+      .eq("id", 1)
+      .maybeSingle(),
   ]);
 
   // 90-day cash flow aggregates by month and category.
@@ -98,15 +105,25 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
   // $2,310 positive — and the agent duly reported three straight negative
   // months. Reports and the recap already excluded them; only this snapshot
   // did not.
+  // Month-end pay counts toward the month it funds when the owner has said so.
+  // Budget and Reports both honour this; a snapshot that did not would have the
+  // agent reasoning about a different July than the pages the owner is reading.
+  const attribution = attributionFrom(settingsRow ?? null);
+
   const monthly = new Map<string, { inflow: number; outflow: number; transfers: number }>();
   const byCategory = new Map<string, number>();
   for (const t of txns ?? []) {
-    const month = String(t.date).slice(0, 7);
-    if (!monthly.has(month)) monthly.set(month, { inflow: 0, outflow: 0, transfers: 0 });
     const amt = Number(t.amount);
     const cat = t.categories as unknown as
       | { name: string; category_groups?: { type: string } | null }
       | null;
+    const isIncome = cat?.category_groups?.type === "income" || (!cat && amt < 0);
+    const month = attributionMonthOf(
+      String(t.date),
+      isIncome && isShiftableIncome(cat?.name),
+      attribution
+    );
+    if (!monthly.has(month)) monthly.set(month, { inflow: 0, outflow: 0, transfers: 0 });
     if (cat?.category_groups?.type === "transfer") {
       monthly.get(month)!.transfers += Math.abs(amt);
       continue;

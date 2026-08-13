@@ -5,6 +5,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { audit } from "@finance/shared";
 import { notify } from "./gmail.js";
 import { indexCategories, type CategoryMeta, type ReportTxn } from "@finance/shared/src/reports";
+import {
+  attributionFrom,
+  attributionMonthOf,
+  incomeWindowFor,
+  isShiftableIncome,
+} from "@finance/shared/src/pay-period";
 import { pace, type GoalRow } from "@finance/shared/src/goals";
 import {
   computeBudget,
@@ -111,10 +117,15 @@ export async function buildFacts(
   const window = periodType === "weekly" ? lastWeekWindow(ref) : lastMonthWindow(ref);
   const prior = priorWindowFor(periodType, window);
 
-  const [{ data: catRows }, current, priorTxns] = await Promise.all([
+  const [{ data: catRows }, current, priorTxns, { data: settingsRow }] = await Promise.all([
     db.from("categories").select("id, name, emoji, group_id, category_groups (name, type)").eq("is_active", true),
     loadTxns(db, window),
     loadTxns(db, prior),
+    db
+      .from("app_settings")
+      .select("income_attribution, income_shift_from_day")
+      .eq("id", 1)
+      .maybeSingle(),
   ]);
 
   const cats: CategoryMeta[] = (catRows ?? []).map((c: any) => ({
@@ -128,7 +139,37 @@ export async function buildFacts(
   const catIndex = indexCategories(cats);
   const catName = new Map(cats.map((c) => [c.id, c.name]));
 
-  const cash_flow = computeCashFlow(current, priorTxns, catIndex);
+  // Month-end pay counts toward the month it funds, when the owner has asked
+  // for that. Applied to monthly recaps only: forward-shifting is a statement
+  // about which month a paycheque pays for, and a week is not a pay period —
+  // shifting income into "next week" would mean nothing.
+  //
+  // Doing it means re-drawing the window for income: July's income reaches back
+  // into late June and stops before late July. So the rows are re-fetched over
+  // the widened span and each is placed by attribution rather than by date.
+  const attribution = attributionFrom(settingsRow ?? null);
+  const shifting = periodType === "monthly" && attribution.mode === "forward_shift";
+
+  let currentTxns = current;
+  let priorForCompare = priorTxns;
+  if (shifting) {
+    const monthKeyOfWindow = window.start.slice(0, 7);
+    const priorKey = prior.start.slice(0, 7);
+    const wide = await loadTxns(db, {
+      start: incomeWindowFor(priorKey, attribution).from,
+      end: window.end,
+      days: 0,
+    });
+    const place = (t: ReportTxn) => {
+      const cat = catIndex.get(t.category_id ?? "");
+      const isIncome = cat ? cat.group_type === "income" : Number(t.amount) < 0;
+      return attributionMonthOf(t.date, isIncome && isShiftableIncome(cat?.name), attribution);
+    };
+    currentTxns = wide.filter((t) => place(t) === monthKeyOfWindow);
+    priorForCompare = wide.filter((t) => place(t) === priorKey);
+  }
+
+  const cash_flow = computeCashFlow(currentTxns, priorForCompare, catIndex);
 
   // Budget: the calendar month containing the period end, measured through the
   // period end (a weekly recap therefore reports month-to-date position).

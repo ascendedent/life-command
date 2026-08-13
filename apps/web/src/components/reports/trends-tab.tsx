@@ -79,11 +79,11 @@ export function TrendsTab({ data, period }: { data: ReportData; period: Period }
     const from = `${cutoff.toISOString().slice(0, 7)}-01`;
     const to = new Date().toISOString().slice(0, 10);
     const rows = data.txns.filter((t) => t.date >= from && t.date <= to);
-    return monthlySeries(rows, data.catIndex, { from, to }).map((p) => ({
+    return monthlySeries(rows, data.catIndex, { from, to }, data.attribution).map((p) => ({
       ...p,
       label: monthLabel(p.month),
     }));
-  }, [data.txns, data.catIndex]);
+  }, [data.txns, data.catIndex, data.attribution]);
 
   const compare = useMemo(() => {
     const priorWindow = basis === "prior_year" ? priorYear(period) : priorPeriod(period);

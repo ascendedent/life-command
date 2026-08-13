@@ -347,6 +347,13 @@ export function buildCashFlowSankey(
 // Time series (MoM / YoY)
 // ---------------------------------------------------------------------------
 
+import {
+  attributionMonthOf,
+  isShiftableIncome,
+  CALENDAR_ATTRIBUTION,
+  type IncomeAttribution,
+} from "./pay-period";
+
 export interface MonthPoint {
   month: string; // YYYY-MM
   income: number;
@@ -359,11 +366,21 @@ export function monthKeyOf(date: string): string {
   return date.slice(0, 7);
 }
 
-/** Dense monthly series — months with no activity still appear, as zeroes. */
+/**
+ * Dense monthly series — months with no activity still appear, as zeroes.
+ *
+ * `attribution` decides which month a paycheque counts toward. Left off, every
+ * transaction falls in the month it posted, which is what a bank statement
+ * shows. Passed the owner's forward_shift setting, earned income landing at
+ * month end counts toward the month it pays for — and it has to be passed here
+ * as well as on the Budget page, or the same payroll deposit sits in July on
+ * one screen and August on another.
+ */
 export function monthlySeries(
   txns: ReportTxn[],
   cats: CategoryIndex,
-  range?: { from: string; to: string }
+  range?: { from: string; to: string },
+  attribution: IncomeAttribution = CALENDAR_ATTRIBUTION
 ): MonthPoint[] {
   const map = new Map<string, MonthPoint>();
   const touch = (key: string) => {
@@ -378,7 +395,11 @@ export function monthlySeries(
   for (const txn of txns) {
     const flow = flowOf(txn, cats);
     if (flow === "transfer") continue;
-    const p = touch(monthKeyOf(txn.date));
+    // Only earned income shifts: a refund reverses a purchase and belongs to
+    // the month it reverses, so isShiftableIncome decides per category.
+    const catName = txn.category_id ? cats.get(txn.category_id)?.name : undefined;
+    const shiftable = flow === "income" && isShiftableIncome(catName);
+    const p = touch(attributionMonthOf(txn.date, shiftable, attribution));
     const amount = magnitude(txn, flow);
     if (flow === "income") p.income += amount;
     else p.expense += amount;

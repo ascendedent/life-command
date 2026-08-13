@@ -1,6 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  attributionFrom,
+  CALENDAR_ATTRIBUTION,
+  type IncomeAttribution,
+} from "@finance/shared/src/pay-period";
 import { createClient } from "@/lib/supabase/client";
 // deep import: the shared index pulls in node-only modules (crypto, plaid)
 import {
@@ -26,6 +31,8 @@ export interface TagMeta {
 }
 
 export interface ReportData {
+  /** How the owner wants month-end income attributed — see pay-period. */
+  attribution: IncomeAttribution;
   txns: ReportTxn[];
   cats: CategoryMeta[];
   catIndex: CategoryIndex;
@@ -53,6 +60,7 @@ export function useReportData(from: string, to: string): ReportData {
   const [accounts, setAccounts] = useState<AccountMeta[]>([]);
   const [tags, setTags] = useState<TagMeta[]>([]);
   const [tagsByTxn, setTagsByTxn] = useState<Map<string, Set<string>>>(new Map());
+  const [attribution, setAttribution] = useState<IncomeAttribution>(CALENDAR_ATTRIBUTION);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -66,8 +74,12 @@ export function useReportData(from: string, to: string): ReportData {
       setLoading(true);
       setError(null);
       try {
-        const [{ data: catRows, error: catErr }, { data: acctRows }, { data: tagRows }] =
-          await Promise.all([
+        const [
+          { data: catRows, error: catErr },
+          { data: acctRows },
+          { data: tagRows },
+          { data: settingsRow },
+        ] = await Promise.all([
             supabase
               .from("categories")
               .select("id, name, emoji, group_id, category_groups (name, type)")
@@ -77,8 +89,14 @@ export function useReportData(from: string, to: string): ReportData {
               .select("id, name, type, mask, is_business, business_entity")
               .order("name"),
             supabase.from("tags").select("id, name, color").order("name"),
+            supabase
+              .from("app_settings")
+              .select("income_attribution, income_shift_from_day")
+              .eq("id", 1)
+              .maybeSingle(),
           ]);
         if (catErr) throw catErr;
+        setAttribution(attributionFrom(settingsRow ?? null));
 
         const catMeta: CategoryMeta[] = (catRows ?? []).map((c) => {
           const g = c.category_groups as unknown as { name: string; type: string } | null;
@@ -146,5 +164,5 @@ export function useReportData(from: string, to: string): ReportData {
 
   const catIndex = useMemo(() => indexCategories(cats), [cats]);
 
-  return { txns, cats, catIndex, accounts, tags, tagsByTxn, loading, error, reload };
+  return { txns, cats, catIndex, accounts, tags, tagsByTxn, attribution, loading, error, reload };
 }
