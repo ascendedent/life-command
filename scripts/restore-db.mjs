@@ -89,6 +89,22 @@ if (!args.includes("--yes")) {
   }
 }
 
+// `pg_dump --schema=public` dumps the schema's *contents* and assumes the schema
+// itself is there — it emits no CREATE SCHEMA. Restoring into a database whose
+// public schema is gone (a fresh container, or the actual disaster this exists
+// for) fails on every single object with "schema public does not exist".
+//
+// Found by dropping the schema and trying it, which is the only test that
+// counts: restoring over a healthy database exercises none of this.
+log("ensuring the public schema exists");
+execSync(
+  `docker exec ${CONTAINER} psql -U postgres -d postgres -c ` +
+    `"create schema if not exists public; ` +
+    `grant usage on schema public to postgres, anon, authenticated, service_role; ` +
+    `grant create on schema public to postgres;"`,
+  { stdio: ["ignore", "ignore", "ignore"], shell: "/bin/bash" }
+);
+
 log(`restoring ${chosen}`);
 try {
   execSync(
@@ -96,12 +112,31 @@ try {
     { stdio: ["ignore", "ignore", "pipe"], shell: "/bin/bash" }
   );
 } catch (e) {
-  // pg_restore warns about objects it could not drop on a fresh database. Those
-  // are noise; a genuine failure shows up in the row counts below, which is why
-  // this reports rather than trusting the exit code.
-  const msg = String(e.stderr || e.message);
-  log(`pg_restore reported issues (often harmless on a clean database):`);
-  console.log(msg.split("\n").slice(0, 8).join("\n"));
+  // Supabase owns four event triggers as `supabase_admin`, so restoring as
+  // `postgres` always fails to drop them. Those four lines appear on every
+  // healthy restore, and printing them as "issues" teaches you to skim past the
+  // output — which is where a real failure would then hide. Filtered by name,
+  // and anything else is surfaced loudly.
+  // With a public-only dump there is nothing a restore legitimately fails on,
+  // so the filter is narrow on purpose: the event triggers Supabase attaches to
+  // the public schema are the only expected noise. Everything else is real.
+  // Two kinds of expected noise, both from objects Supabase owns as
+  // `supabase_admin`: its event triggers on the public schema, and the default
+  // privileges it sets there. Neither affects the restored data, and both appear
+  // on every healthy restore. Everything else is real and gets shouted about.
+  const EXPECTED = new RegExp(
+    "must be owner of event trigger (pgrst_drop_watch|pgrst_ddl_watch|issue_pg_net_access" +
+      "|issue_pg_graphql_access|issue_pg_cron_access|issue_graphql_placeholder)" +
+      "|permission denied to change default privileges"
+  );
+  const lines = String(e.stderr || e.message).split("\n").filter((l) => l.trim());
+  const real = lines.filter((l) => l.includes("error:") && !EXPECTED.test(l));
+  if (real.length) {
+    log(`pg_restore reported ${real.length} unexpected error(s):`);
+    for (const l of real.slice(0, 10)) console.log(`  ${l}`);
+  } else {
+    log(`pg_restore finished (${lines.length} expected ownership notices suppressed)`);
+  }
 }
 
 const storageTar = dumpPath.replace(/\.dump$/, ".storage.tar.gz");

@@ -30,11 +30,14 @@ const DEST =
 const KEEP = Number(process.env.BACKUP_KEEP || 14);
 const CONTAINER = process.env.SUPABASE_DB_CONTAINER || "supabase_db_Finance_Dashboard";
 
-const stamp = new Date()
-  .toISOString()
-  .replace(/[-:]/g, "")
-  .replace("T", "_")
-  .slice(0, 15);
+// Local time, not UTC — it has to line up with the timer that fired it and with
+// the dump names already in the neighbouring project directory, or comparing two
+// backups means doing timezone arithmetic in your head at the worst moment.
+const now = new Date();
+const p2 = (n) => String(n).padStart(2, "0");
+const stamp =
+  `${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}` +
+  `_${p2(now.getHours())}${p2(now.getMinutes())}${p2(now.getSeconds())}`;
 const base = `finance_full_${stamp}`;
 
 const log = (m) => console.log(`[backup] ${m}`);
@@ -66,10 +69,30 @@ const logPath = join(DEST, `${base}.log`);
 
 log(`dumping ${CONTAINER} -> ${dumpPath}`);
 try {
+  // `--schema=public` only, and this is the important part.
+  //
+  // A whole-database dump also carries Supabase's own schemas — auth, storage,
+  // graphql, realtime, vector — every one of them owned by `supabase_admin`.
+  // Restoring as `postgres` cannot touch them, so a full dump restores with
+  // ~715 ownership errors while the application tables quietly succeed. The
+  // first version of this script did exactly that: the verification marker came
+  // back, the restore "worked", and the noise would have hidden a genuine
+  // failure perfectly.
+  //
+  // `public` is the entire application. What it leaves behind is the owner's
+  // login, recreated in two minutes with `npm run owner:create` plus
+  // re-enrolling the authenticator — a far better trade than a dump that cannot
+  // be restored cleanly.
+  //
+  // ACLs are kept. `--no-acl` looks like a companion to `--no-owner` and is not:
+  // it strips every GRANT, and this schema hands explicit DML to `authenticated`
+  // on every table. A restore without them produces a database with correct rows,
+  // correct RLS, and an application that cannot read a single one of them.
+  //
   // -Fc is the custom format: compressed, and restorable selectively with
   // pg_restore, which matters when you want one table back rather than all of it.
   execSync(
-    `docker exec ${CONTAINER} pg_dump -U postgres -d postgres -Fc --no-owner > ${JSON.stringify(dumpPath)}`,
+    `docker exec ${CONTAINER} pg_dump -U postgres -d postgres -Fc --schema=public --no-owner > ${JSON.stringify(dumpPath)}`,
     { stdio: ["ignore", "ignore", "pipe"], shell: "/bin/bash" }
   );
 } catch (e) {
