@@ -471,7 +471,28 @@ not tell the two apart. Fourteen sets are kept (`BACKUP_KEEP`).
 when it wakes.
 
 **Restore is written and tested alongside the backup, not after the first
-disaster.** A dump nobody has restored is a file, not a backup.
+disaster.** A dump nobody has restored is a file, not a backup. It was verified
+the only way that counts — `drop schema public cascade`, then restore — which is
+what caught the dump omitting `CREATE SCHEMA`, and `--no-acl` silently stripping
+every GRANT.
+
+A failed backup fires `finance-backup-notify.service`: a desktop toast and, if
+`NTFY_TOPIC` is set, a push. A nightly job that stops running looks exactly like
+one that runs, and the failure that costs you something is the one nobody was
+sitting at the machine to see.
+
+**What this still does not protect against**, so it is not mistaken for more
+than it is:
+
+- Up to 24 hours of loss between snapshots. Transactions re-sync from Plaid, so
+  the real exposure is a day of manual corrections.
+- The backups share a disk with the repo (`/`), not with the database
+  (`/mnt/scratch`) — which is what makes them survive the failure that has
+  already happened once. A root-disk failure is a different story, and the
+  off-machine copy in Drive is what covers it.
+- Nothing yet proves an *old* dump still restores. The nightly run checks that a
+  dump was written and records row counts; it does not restore it. A periodic
+  test-restore into a throwaway database is the honest next step.
 
 ## Aldyn
 

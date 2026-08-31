@@ -1,0 +1,8 @@
+# Template — installed by scripts/install-services.sh.
+[Unit]
+Description=Notify that a Finance Dashboard backup failed
+
+[Service]
+Type=oneshot
+WorkingDirectory=@ROOT@
+ExecStart=/usr/bin/env bash scripts/backup-notify.sh

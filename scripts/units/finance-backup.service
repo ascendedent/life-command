@@ -4,6 +4,9 @@ Description=Finance Dashboard — database backup into the rclone-synced project
 # The stack has to be up for pg_dump to have anything to talk to.
 After=finance-supabase.service
 Wants=finance-supabase.service
+# A backup that stops running looks exactly like one that runs, until the day
+# it is the only thing left. Failure has to be loud.
+OnFailure=finance-backup-notify.service
 
 [Service]
 Type=oneshot

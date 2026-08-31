@@ -12,7 +12,7 @@ echo "[install] repo:  $ROOT"
 echo "[install] node:  $NODE_BIN"
 
 mkdir -p "$HOME/.config/systemd/user"
-for unit in finance-supabase finance-web finance-workers finance-backup; do
+for unit in finance-supabase finance-web finance-workers finance-backup finance-backup-notify; do
   sed -e "s|@ROOT@|$ROOT|g" \
       -e "s|@NODE@|$NODE_BIN|g" \
       -e "s|@NODE_DIR@|$NODE_DIR|g" \
