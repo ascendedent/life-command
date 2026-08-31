@@ -12,7 +12,7 @@ echo "[install] repo:  $ROOT"
 echo "[install] node:  $NODE_BIN"
 
 mkdir -p "$HOME/.config/systemd/user"
-for unit in finance-supabase finance-web finance-workers; do
+for unit in finance-supabase finance-web finance-workers finance-backup; do
   sed -e "s|@ROOT@|$ROOT|g" \
       -e "s|@NODE@|$NODE_BIN|g" \
       -e "s|@NODE_DIR@|$NODE_DIR|g" \
@@ -20,8 +20,15 @@ for unit in finance-supabase finance-web finance-workers; do
   echo "[install] wrote ~/.config/systemd/user/$unit.service"
 done
 
+# The backup timer is a separate file from its service.
+sed -e "s|@ROOT@|$ROOT|g" -e "s|@NODE@|$NODE_BIN|g" \
+    "scripts/units/finance-backup.timer" > "$HOME/.config/systemd/user/finance-backup.timer"
+echo "[install] wrote ~/.config/systemd/user/finance-backup.timer"
+
 systemctl --user daemon-reload
 systemctl --user enable finance-supabase finance-web finance-workers
+# Enable the timer, not the service — the service is what the timer fires.
+systemctl --user enable finance-backup.timer
 
 # Lets user services start at boot without a login session.
 if loginctl enable-linger "$USER" 2>/dev/null; then

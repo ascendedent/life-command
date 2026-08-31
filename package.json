@@ -2,7 +2,7 @@
   "name": "finance-dashboard",
   "private": true,
   "version": "0.1.0",
-  "description": "Personal AI finance platform \u2014 local-first build",
+  "description": "Personal AI finance platform — local-first build",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -25,7 +25,9 @@
     "svc:restart": "node scripts/svc.mjs restart",
     "svc:status": "node scripts/svc.mjs status",
     "svc:logs": "node scripts/svc.mjs logs",
-    "up": "node scripts/svc.mjs up"
+    "up": "node scripts/svc.mjs up",
+    "db:backup": "node scripts/backup-db.mjs",
+    "db:restore": "node scripts/restore-db.mjs"
   },
   "devDependencies": {
     "supabase": "^2.0.0",

@@ -1,0 +1,15 @@
+# Template — installed by scripts/install-services.sh (placeholders substituted).
+[Unit]
+Description=Finance Dashboard — database backup into the rclone-synced projects tree
+# The stack has to be up for pg_dump to have anything to talk to.
+After=finance-supabase.service
+Wants=finance-supabase.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=@ROOT@
+ExecStart=@NODE@ scripts/backup-db.mjs
+# A failed backup must be visible. Without this it exits non-zero into silence,
+# which is indistinguishable from a backup that ran.
+StandardOutput=journal
+StandardError=journal

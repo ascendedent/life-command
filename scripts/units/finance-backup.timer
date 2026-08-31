@@ -1,0 +1,15 @@
+# Template — installed by scripts/install-services.sh.
+[Unit]
+Description=Nightly Finance Dashboard database backup
+
+[Timer]
+# 03:30 — after the 02:00 daily jobs have written recurring detection, net worth
+# and goal matching, and before the 05:30 enrichment run.
+OnCalendar=*-*-* 03:30:00
+# A machine that was asleep at 03:30 still gets a backup when it wakes. The
+# whole point is surviving the day nobody was watching.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

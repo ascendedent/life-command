@@ -432,6 +432,47 @@ Alpaca, Kalshi) to root `.env` — `sync-env` preserves unmanaged lines.
 - [ ] **Phase 5 — Desktop app packaging:** Tauri shell, approval-badge count on the tray icon, native notifications wired to `notification_rules` (tray v0 + launcher + installable PWA manifest exist now)
 - [ ] **Settings: per-function model selector** — choose the Claude model per LLM function (agent analysis, categorization enrichment, recap scoring, subscription review) from a settings UI; currently env-based (`AGENT_MODEL`, default `claude-sonnet-5`)
 
+## Backups
+
+**The database is the only thing here that cannot be rebuilt.** Transactions
+re-sync from Plaid and everything derived from them recomputes; what does not
+come back is the teaching — manual corrections and the merchant map built from
+them, review decisions, goals, budgets, household assignments, receipts, and
+the Plaid access tokens, which live encrypted in the database and cannot be
+re-issued by Plaid. Losing them means re-linking every institution, and on a
+Trial plan those Item slots are not returned.
+
+This install learned that on 2026-08-29. The repo was being synced off-machine
+the whole time; Postgres was not, because it lived in a Docker volume on a
+scratch disk outside every synced path.
+
+```
+npm run db:backup            # pg_dump -Fc + storage bucket, dated
+npm run db:restore -- --list # what is available
+npm run db:restore           # newest, after confirmation
+npm run db:restore -- <file> # a specific dump
+```
+
+Backups are written **outside the repo**, to a sibling directory
+(`../Supabase Backup - Finance Dashboard/`, override with `BACKUP_DIR`). That is
+deliberate: a dump holds real balances and merchant names and this repo is
+public, so keeping it out of the working tree means it cannot be committed even
+by accident. Whatever already syncs your projects directory carries it
+off-machine without further configuration.
+
+Each run writes three files plus the bucket when it has contents — the dump,
+a `pg_restore -l` table of contents, and a log recording row counts at the time
+of the dump. The row counts matter: a dump that restores cleanly and contains
+nothing is the failure this exists to prevent, and a file size in megabytes does
+not tell the two apart. Fourteen sets are kept (`BACKUP_KEEP`).
+
+`npm run svc:install` installs `finance-backup.timer`, which runs nightly at
+03:30 with `Persistent=true` so a machine that was asleep still gets its backup
+when it wakes.
+
+**Restore is written and tested alongside the backup, not after the first
+disaster.** A dump nobody has restored is a file, not a backup.
+
 ## Aldyn
 
 **Aldyn ([getaldyn.com](https://getaldyn.com))** is a separate receipt-capture
