@@ -14,11 +14,13 @@ import {
   Bot,
   Sparkles,
   ScrollText,
+  MessageSquare,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
+  { href: "/chat", label: "Chat", icon: MessageSquare },
   { href: "/queue", label: "Approval Queue", icon: Inbox },
   { href: "/goals", label: "Goals", icon: Target },
   { href: "/budget", label: "Budget", icon: Wallet },

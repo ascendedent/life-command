@@ -432,6 +432,41 @@ Alpaca, Kalshi) to root `.env` — `sync-env` preserves unmanaged lines.
 - [ ] **Phase 5 — Desktop app packaging:** Tauri shell, approval-badge count on the tray icon, native notifications wired to `notification_rules` (tray v0 + launcher + installable PWA manifest exist now)
 - [ ] **Settings: per-function model selector** — choose the Claude model per LLM function (agent analysis, categorization enrichment, recap scoring, subscription review) from a settings UI; currently env-based (`AGENT_MODEL`, default `claude-sonnet-5`)
 
+## Chat, and running without an API key
+
+`/chat` answers questions about your own money — balances, the last 90 days of
+spending, goals, recurring bills and your floors — from a snapshot rather than
+from guesswork, with account identifiers masked to a last-four the same way the
+agent's are. It is advisory: it cannot move money, place a trade, or change a
+setting.
+
+**It runs on the Claude Code login already on the machine.** No
+`ANTHROPIC_API_KEY`, no metered billing. The Claude Agent SDK authenticates the
+way Claude Code does, so a Pro or Max subscription is enough. What the honest
+answer looks like per provider:
+
+| Provider | Keyless? | Notes |
+|---|---|---|
+| `claude_code` | **yes** — uses the Claude Code login | chat only; no schema-enforced output |
+| `anthropic` | no | `ANTHROPIC_API_KEY`; powers the workers |
+| `google` | free tier, not a login | AI Studio issues a no-card key |
+| `openai` | **no** | a ChatGPT subscription does not include API access; they are billed separately |
+| `ollama` | **yes** — no account at all | local models, no network, no bill |
+
+Chat and the workers are configured separately (`app_settings.llm_chat_provider`
+versus `llm_provider`) and have to be. `claude_code` is chat-capable and
+schema-incapable, and every worker depends on schema-enforced output — the
+agent's recommendations, the recap's scores, categorisation, receipt parsing.
+Pointing one shared setting at it would give you free chat and a nightly agent
+that silently produces nothing, so `resolveLlmSettings` refuses to hand a
+chat-only provider to a worker and falls back with a warning.
+
+The Agent SDK is Claude Code, which means it ships with a filesystem and a
+shell. Every tool is denied, the Claude Code system preset is replaced, and
+`settingSources: []` keeps your CLAUDE.md and permission rules out of a context
+that has no business seeing them. What is left is a model call with a
+subscription behind it.
+
 ## Backups
 
 **The database is the only thing here that cannot be rebuilt.** Transactions

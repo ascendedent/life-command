@@ -24,7 +24,7 @@
 
 import { z } from "zod";
 
-export type LlmProvider = "anthropic" | "google" | "openai" | "ollama";
+export type LlmProvider = "claude_code" | "anthropic" | "google" | "openai" | "ollama";
 export type LlmAuth = "api_key" | "oauth" | "none";
 
 export interface LlmSettings {
@@ -54,6 +54,9 @@ export interface LlmRequest<T> {
 }
 
 export const DEFAULT_MODELS: Record<LlmProvider, string> = {
+  // Aliases, not pinned ids: the Agent SDK resolves these against whatever
+  // Claude Code ships with, so this keeps working across upgrades.
+  claude_code: "sonnet",
   anthropic: "claude-sonnet-5",
   google: "gemini-2.5-flash",
   openai: "gpt-5-mini",
@@ -108,10 +111,32 @@ export interface ProviderStatus {
 export async function providerStatuses(): Promise<ProviderStatus[]> {
   const oauth = await anthropicOauthProfileExists();
   const key = nonEmpty(process.env.ANTHROPIC_API_KEY);
+  // Claude Code's own credentials, already on this machine. Detected by the
+  // presence of its credential file rather than by running anything — asking
+  // the SDK would mean making a billable-or-not request to find out.
+  let claudeCode = false;
+  try {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    claudeCode = fs.existsSync(`${os.homedir()}/.claude/.credentials.json`);
+  } catch {
+    claudeCode = false;
+  }
+
   return [
     {
+      provider: "claude_code",
+      label: "Claude (signed in)",
+      ready: claudeCode,
+      auth: claudeCode ? "oauth" : "none",
+      subscriptionLogin: "yes",
+      detail: claudeCode
+        ? "using the Claude Code login already on this machine — no API key, no metered billing. Chat only: no schema-enforced output, so the workers need a second provider."
+        : "install Claude Code and sign in — then this needs no API key at all",
+    },
+    {
       provider: "anthropic",
-      label: "Claude",
+      label: "Claude (API key)",
       ready: key || oauth,
       auth: key ? "api_key" : oauth ? "oauth" : "none",
       subscriptionLogin: "yes",
@@ -347,6 +372,24 @@ function safeParse<T>(text: string, schema: z.ZodType<T>): T | null {
 export async function completeStructured<T>(req: LlmRequest<T>): Promise<LlmResult<T>> {
   try {
     switch (req.settings.provider) {
+      case "claude_code":
+        // The Agent SDK exposes no schema-enforced output, and every worker
+        // that calls this depends on one: the agent's recommendations, the
+        // recap's scores, categorisation, receipt parsing. Asking for JSON in a
+        // prompt and hoping is not the same guarantee, and the grounding checks
+        // downstream assume a shape that was enforced rather than requested.
+        //
+        // So this provider is chat-only, and says so plainly instead of
+        // returning a plausible object that nothing validated. The workers stay
+        // on a schema-capable provider even when the chat does not.
+        return {
+          parsed: null,
+          refusal: false,
+          tokens: 0,
+          model: req.settings.model,
+          error:
+            "claude_code has no schema-enforced output — it powers the chat, not the workers. Choose anthropic, google, openai or ollama for this.",
+        };
       case "anthropic":
         return await anthropicStructured(req);
       case "google":
@@ -374,6 +417,9 @@ export async function completeStructured<T>(req: LlmRequest<T>): Promise<LlmResu
 /** Which job is asking. Each may pin its own model; all share one provider. */
 export type LlmRole = "agent" | "recap" | "enrich" | "receipt" | "chat";
 
+/** Providers whose output can be constrained to a schema. */
+const SCHEMA_CAPABLE = new Set<LlmProvider>(["anthropic", "google", "openai", "ollama"]);
+
 const ROLE_ENV: Record<LlmRole, string> = {
   agent: "AGENT_MODEL",
   recap: "RECAP_MODEL",
@@ -396,16 +442,214 @@ export async function resolveLlmSettings(
 ): Promise<LlmSettings> {
   const { data } = await db
     .from("app_settings")
-    .select("llm_provider, llm_auth")
+    .select("llm_provider, llm_auth, llm_chat_provider, llm_chat_auth")
     .eq("id", 1)
     .maybeSingle();
 
-  const provider = (data?.llm_provider ?? process.env.LLM_PROVIDER ?? "anthropic") as LlmProvider;
-  const auth = (data?.llm_auth ?? "api_key") as LlmAuth;
+  const shared = (data?.llm_provider ?? process.env.LLM_PROVIDER ?? "anthropic") as LlmProvider;
+  let provider =
+    role === "chat" ? ((data?.llm_chat_provider as LlmProvider) ?? shared) : shared;
+  let auth = (role === "chat"
+    ? ((data?.llm_chat_auth as LlmAuth) ?? data?.llm_auth ?? "api_key")
+    : (data?.llm_auth ?? "api_key")) as LlmAuth;
+
+  // A chat-only provider handed to a worker produces nothing, every night,
+  // quietly. Rather than let a settings change break the agent, fall back and
+  // say so — the workers need schema-enforced output and claude_code has none.
+  if (role !== "chat" && !SCHEMA_CAPABLE.has(provider)) {
+    console.warn(
+      `[llm] ${provider} cannot produce schema-enforced output; ${role} falling back to anthropic`
+    );
+    provider = "anthropic";
+    auth = (data?.llm_auth as LlmAuth) === "oauth" ? "api_key" : ((data?.llm_auth as LlmAuth) ?? "api_key");
+  }
   const model =
     process.env[ROLE_ENV[role]] ||
     (provider === "anthropic" ? process.env.AGENT_MODEL : undefined) ||
     DEFAULT_MODELS[provider];
 
   return { provider, model, auth };
+}
+
+// ---------------------------------------------------------------------------
+// Conversation
+// ---------------------------------------------------------------------------
+
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatResult {
+  reply: string | null;
+  tokens: number;
+  model: string;
+  error?: string;
+}
+
+/**
+ * `claude_code` is the answer to "can this run without an API key".
+ *
+ * The Claude Agent SDK is Claude Code packaged as a library, and it
+ * authenticates the way Claude Code does — against the credentials already on
+ * the machine, which for a Pro or Max subscriber is the subscription. No
+ * ANTHROPIC_API_KEY, no metered billing, nothing to paste into a settings page.
+ *
+ * It is also, structurally, Claude Code: a coding agent with a filesystem and a
+ * shell. Pointing that at a finance chat without locking it down would give a
+ * conversation about spending the ability to read the repo and run commands.
+ * So every tool is denied, the Claude Code system preset is replaced with our
+ * own, and no filesystem settings are loaded — `settingSources: []` keeps the
+ * owner's CLAUDE.md and permission rules out of a context that has no business
+ * seeing them. What is left is a plain model call with a subscription behind it.
+ */
+async function claudeCodeChat(
+  system: string,
+  turns: ChatTurn[],
+  model: string
+): Promise<ChatResult> {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+
+  // The SDK takes a single prompt rather than a message array, so the history
+  // is rendered into it. Labelled explicitly: an unlabelled transcript reads as
+  // one enormous user message and the model loses track of who said what.
+  const transcript = turns
+    .map((t) => `${t.role === "user" ? "Owner" : "You"}: ${t.content}`)
+    .join("\n\n");
+
+  let reply = "";
+  let tokens = 0;
+  try {
+    for await (const message of query({
+      prompt: transcript,
+      options: {
+        systemPrompt: system,
+        model,
+        // Not a coding agent here.
+        allowedTools: [],
+        disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
+        permissionMode: "default",
+        settingSources: [],
+        maxTurns: 1,
+      },
+    } as never)) {
+      const m = message as { type?: string; message?: { content?: unknown; usage?: Record<string, number> } };
+      if (m.type !== "assistant") continue;
+      const content = m.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content as { type?: string; text?: string }[]) {
+          if (block.type === "text" && block.text) reply += block.text;
+        }
+      }
+      const u = m.message?.usage;
+      if (u) tokens += (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
+    }
+  } catch (e: unknown) {
+    return { reply: null, tokens: 0, model, error: (e as Error).message };
+  }
+  return { reply: reply.trim() || null, tokens, model };
+}
+
+async function anthropicChat(
+  system: string,
+  turns: ChatTurn[],
+  settings: LlmSettings
+): Promise<ChatResult> {
+  const client = await anthropicClient(settings.auth);
+  const res = await client.messages.create({
+    model: settings.model,
+    max_tokens: 4000,
+    system,
+    messages: turns.map((t) => ({ role: t.role, content: t.content })),
+  });
+  const reply = res.content
+    .filter((b): b is { type: "text"; text: string; citations: never } => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+  return {
+    reply: res.stop_reason === "refusal" ? null : reply.trim() || null,
+    tokens: (res.usage?.input_tokens ?? 0) + (res.usage?.output_tokens ?? 0),
+    model: settings.model,
+    error: res.stop_reason === "refusal" ? "the model declined to answer" : undefined,
+  };
+}
+
+/**
+ * Hold a conversation, on whichever provider the owner configured.
+ *
+ * Mirrors `completeStructured` deliberately: same settings, same failure shape,
+ * so the chat surface and the workers cannot drift apart about who is answering.
+ */
+export async function chat(
+  settings: LlmSettings,
+  system: string,
+  turns: ChatTurn[]
+): Promise<ChatResult> {
+  try {
+    switch (settings.provider) {
+      case "claude_code":
+        return await claudeCodeChat(system, turns, settings.model);
+      case "anthropic":
+        return await anthropicChat(system, turns, settings);
+      case "google": {
+        const key = process.env.GOOGLE_AI_API_KEY;
+        if (!key) throw new Error("GOOGLE_AI_API_KEY is not set");
+        const data = await postJson(
+          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.model)}:generateContent`,
+          {
+            systemInstruction: { parts: [{ text: system }] },
+            contents: turns.map((t) => ({
+              role: t.role === "assistant" ? "model" : "user",
+              parts: [{ text: t.content }],
+            })),
+            generationConfig: { maxOutputTokens: 4000 },
+          },
+          { "x-goog-api-key": key }
+        );
+        const parts = data.candidates?.[0]?.content?.parts ?? [];
+        return {
+          reply: parts.map((p: { text?: string }) => p.text ?? "").join("").trim() || null,
+          tokens: data.usageMetadata?.totalTokenCount ?? 0,
+          model: settings.model,
+        };
+      }
+      case "openai": {
+        const key = process.env.OPENAI_API_KEY;
+        if (!key) throw new Error("OPENAI_API_KEY is not set");
+        const data = await postJson(
+          `${process.env.OPENAI_BASE_URL || "https://api.openai.com/v1"}/chat/completions`,
+          {
+            model: settings.model,
+            max_completion_tokens: 4000,
+            messages: [{ role: "system", content: system }, ...turns],
+          },
+          { Authorization: `Bearer ${key}` }
+        );
+        return {
+          reply: data.choices?.[0]?.message?.content?.trim() || null,
+          tokens: data.usage?.total_tokens ?? 0,
+          model: settings.model,
+        };
+      }
+      case "ollama": {
+        const host = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+        const data = await postJson(
+          `${host}/api/chat`,
+          {
+            model: settings.model,
+            stream: false,
+            messages: [{ role: "system", content: system }, ...turns],
+          },
+          {}
+        );
+        return {
+          reply: data.message?.content?.trim() || null,
+          tokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0),
+          model: settings.model,
+        };
+      }
+    }
+  } catch (e: unknown) {
+    return { reply: null, tokens: 0, model: settings.model, error: (e as Error).message };
+  }
 }
