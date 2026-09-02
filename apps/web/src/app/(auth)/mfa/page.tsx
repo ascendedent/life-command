@@ -11,6 +11,48 @@ import { ShieldCheck } from "lucide-react";
 
 type Mode = "loading" | "enroll" | "challenge";
 
+/**
+ * A TOTP enrolment in progress, held across reloads.
+ *
+ * sessionStorage rather than localStorage: this is a secret, it is already on
+ * screen as a QR code and in text beneath it, and it should not outlive the
+ * tab. It is deleted the moment the factor verifies.
+ */
+interface PendingEnrollment {
+  factorId: string;
+  qr: string;
+  secret: string;
+}
+
+const PENDING_KEY = "lc.mfa.pending";
+
+function readPendingEnrollment(): PendingEnrollment | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as PendingEnrollment;
+    return p.factorId && p.secret ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePendingEnrollment(p: PendingEnrollment) {
+  try {
+    sessionStorage.setItem(PENDING_KEY, JSON.stringify(p));
+  } catch {
+    /* private mode, storage disabled — enrolment still works, just not resumable */
+  }
+}
+
+function clearPendingEnrollment() {
+  try {
+    sessionStorage.removeItem(PENDING_KEY);
+  } catch {
+    /* nothing to clean up */
+  }
+}
+
 export default function MfaPage() {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("loading");
@@ -43,7 +85,31 @@ export default function MfaPage() {
         return;
       }
 
-      // Clear abandoned unverified factors so enroll doesn't collide.
+      // Reloading this page used to rotate the secret.
+      //
+      // Enrolment cleared every unverified factor and issued a fresh one on
+      // each mount, so a refresh — or a back-navigation, or scanning the code
+      // and then wandering off to fetch the phone — silently invalidated the QR
+      // that had just been scanned. The authenticator kept the old secret, the
+      // server held a new one, and every code from then on was wrong with no
+      // indication why. It cost a real enrolment before anyone worked it out.
+      //
+      // A pending enrolment is now remembered and reused: the same factor, the
+      // same secret, across as many reloads as it takes. Rotation only happens
+      // when there is nothing to resume.
+      const pending = readPendingEnrollment();
+      const stillOpen =
+        pending && data.all.find((f) => f.id === pending.factorId && f.status === "unverified");
+      if (pending && stillOpen) {
+        setFactorId(pending.factorId);
+        setQr(pending.qr);
+        setSecret(pending.secret);
+        setMode("enroll");
+        return;
+      }
+
+      // Nothing to resume: clear abandoned factors so enroll doesn't collide.
+      clearPendingEnrollment();
       for (const f of data.all) {
         if (f.status === "unverified") {
           await supabase.auth.mfa.unenroll({ factorId: f.id });
@@ -62,6 +128,11 @@ export default function MfaPage() {
       setFactorId(enrollData.id);
       setQr(enrollData.totp.qr_code);
       setSecret(enrollData.totp.secret);
+      writePendingEnrollment({
+        factorId: enrollData.id,
+        qr: enrollData.totp.qr_code,
+        secret: enrollData.totp.secret,
+      });
       setMode("enroll");
     }
 
@@ -80,10 +151,18 @@ export default function MfaPage() {
     });
     setBusy(false);
     if (error) {
-      setError(error.message);
+      // The overwhelmingly common cause is an older entry for this app still
+      // sitting in the authenticator — after a database restore or a re-enrol
+      // it generates perfectly valid codes for a secret the server no longer
+      // holds. Say so, because "Invalid TOTP code" alone sends people hunting
+      // for a clock problem.
+      setError(
+        `${error.message} — if your authenticator has an older entry for this app, delete it and scan the code above again.`
+      );
       setCode("");
       return;
     }
+    clearPendingEnrollment();
     router.push("/");
     router.refresh();
   }
@@ -133,6 +212,10 @@ export default function MfaPage() {
                   {secret}
                 </p>
               )}
+              <p className="text-center text-xs text-muted-foreground">
+                Delete any older entry for this app first — an old one still
+                produces codes, and none of them will work.
+              </p>
             </div>
           )}
 
