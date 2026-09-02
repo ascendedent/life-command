@@ -558,7 +558,7 @@ Moving real money needs the other question: *is the world after this action stil
 - The projection is **conservative on every axis**: pending outflows count, pending inflows do not; the sync's staleness is subtracted rather than ignored. A floor computed from a balance last synced six hours ago is a guess, and the honest response to a stale balance is to refuse, not to assume.
 - **Floors also constrain advice, not just execution.** An agent that recommends what its own limits would refuse is an agent training the owner to ignore it.
 
-**UI:** floors live on a *Limits* surface beside the caps, each stated in the owner's words with its current headroom shown live — "Liquid minimum $10,000 · you are $7,013 above it". Every approval that touches money shows the projected before-and-after against every floor it comes near, because the number that matters at the moment of approval is not the size of the transfer, it is what is left afterwards.
+**UI:** floors live on a *Limits* surface beside the caps, each stated in the owner's words with its current headroom shown live — "Liquid minimum $10,000 · you are $2,500 above it". Every approval that touches money shows the projected before-and-after against every floor it comes near, because the number that matters at the moment of approval is not the size of the transfer, it is what is left afterwards.
 
 ### Phase 4: Bounded Autonomy (est. 2-3 sessions)
 

@@ -324,11 +324,11 @@ export async function loadFloorState(
   // Whole calendar months only, and the median of them rather than the mean.
   //
   // Dividing a 180-day total by six mixes two partial months into the average
-  // and calls the result monthly spending. And a mean over this owner's real
-  // spread — $1,634 in the quietest month against $15,837 in the month they
-  // moved house — is dragged around by one-off events, which is the wrong
-  // property for a number that sets a floor. A floor that jumps because you
-  // moved once is a floor that misleads.
+  // and calls the result monthly spending. And a mean is dragged around by
+  // one-off events: a household whose quiet months run near $2,000 and whose
+  // moving month hits $16,000 gets an "average" that describes neither, which
+  // is the wrong property for a number that sets a floor. A floor that jumps
+  // because you moved house once is a floor that misleads.
   const byMonth = new Map<string, number>();
   for (const t of expenses) {
     const m = String((t as { date?: string }).date ?? "").slice(0, 7);
