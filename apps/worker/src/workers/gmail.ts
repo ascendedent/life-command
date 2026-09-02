@@ -206,7 +206,7 @@ export function extractTotal(text: string): ExtractedTotal {
  *
  * Ingesting one creates a phantom anticipation named after the *card*, which
  * then tries to reconcile against the very transaction it was describing:
- * "Is Getoutpass the same as Capital One | Quicksilver?" The answer is neither
+ * "Is Parkpass the same as Northgate Bank | Cashback Plus?" The answer is neither
  * yes nor no — the question should never have been asked.
  *
  * Two signals, because neither is complete alone:
@@ -312,7 +312,7 @@ export function looksFinancialSender(opts: {
   if (ISSUER_DOMAIN_HINTS.some((h) => domain.includes(h))) return true;
 
   // A linked institution's name showing up as the "merchant" is the giveaway:
-  // "Capital One | Quicksilver", "OnePay CashRewards Card".
+  // "Northgate Bank | Cashback Plus", "Riverbend Rewards Card".
   for (const name of opts.institutionNames) {
     const n = name.toLowerCase().trim();
     if (n.length < 4) continue;

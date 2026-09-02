@@ -390,9 +390,9 @@ async function buildSnapshot(db: SupabaseClient): Promise<SnapshotResult> {
     // masked: name + last-4 only, never full identifiers (spec §7.7)
     accounts: (accounts ?? []).map((a) => ({
       // One pre-joined string to quote, because pairing a name with a mask is
-      // a step the model gets wrong and does not need to take: three cards read
-      // "Quicksilver" and three read "CREDIT CARD", so the mask is the only
-      // thing that identifies them and it must travel with the name.
+      // a step the model gets wrong and does not need to take: several cards can
+      // share one product name and several more read only "CREDIT CARD", so the
+      // mask is the only thing identifying them and must travel with the name.
       label: `${a.name} ‥${a.mask ?? "????"}`,
       name: a.name,
       last4: a.mask,

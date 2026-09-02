@@ -48,8 +48,8 @@ export async function POST(request: Request) {
     // their logins produces two Plaid Items, and Plaid issues a *different*
     // account_id per Item — so the unique constraint on plaid_account_id does
     // not fire, and the same balance and the same transactions land twice.
-    // A shared Quicksilver did exactly that: net worth was wrong by the full
-    // balance and every charge on it was counted twice.
+    // A card shared by two members of a household did exactly that: net worth
+    // was wrong by the full balance and every charge on it was counted twice.
     //
     // Matched on institution, mask, type and name together. Mask alone is not
     // enough — a loan and a savings account at the same credit union can share

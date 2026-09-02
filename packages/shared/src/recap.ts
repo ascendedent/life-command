@@ -445,11 +445,11 @@ export interface AccountRefResult {
  *
  * Each mask is paired with the nearest account name mentioned before it, which
  * is how these are actually written. Sentences naming two accounts
- * ("move from SAVINGS (5678) to Discover (9012)") therefore check each
+ * ("move from SAVINGS (5678) to Everyday Card (9012)") therefore check each
  * pair independently rather than cross-multiplying into false positives.
  *
- * A name may map to several masks — three cards can all read "Quicksilver" —
- * so any mask belonging to that name is accepted.
+ * A name may map to several masks — several cards can all read the same
+ * product name — so any mask belonging to that name is accepted.
  */
 export function verifyAccountReferences(
   texts: string[],
