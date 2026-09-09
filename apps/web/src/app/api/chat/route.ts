@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/api-auth";
 import {
+  ATTACHMENT_TYPES,
+  IMAGE_TYPES,
+  MAX_ATTACHMENT_BYTES,
   chat,
   evaluateFloors,
   fetchAll,
@@ -8,6 +11,7 @@ import {
   resolveLlmSettings,
   type ChatTurn,
   type Floor,
+  type LlmAttachment,
 } from "@finance/shared";
 
 /**
@@ -22,17 +26,21 @@ import {
 async function buildContext(supabase: Parameters<typeof loadFloorState>[0]) {
   const since = new Date(Date.now() - 90 * 86400_000).toISOString().slice(0, 10);
 
-  const [{ data: accounts }, { data: goals }, { data: recurring }, { data: floorRows }, txns] =
+  const [{ data: accounts }, { data: goals }, { data: recurring }, { data: floorRows }, { data: liabilities }, txns] =
     await Promise.all([
       supabase
         .from("accounts")
-        .select("name, mask, type, subtype, current_balance, household_members (name)"),
+        .select("id, name, mask, type, subtype, current_balance, household_members (name)"),
       supabase.from("goals").select("name, type, target_amount, current_amount, target_date, status"),
       supabase
         .from("recurring_items")
         .select("merchant, cadence, expected_amount, next_expected_date, status")
         .in("status", ["active", "price_changed", "missed"]),
       supabase.from("agent_floors").select("*"),
+      // Rates, so "which card should I pay first" has something to answer with.
+      supabase
+        .from("liabilities")
+        .select("account_id, type, apr, aprs, minimum_payment, next_due_date, last_statement_balance, last_statement_issue_date, last_payment_amount, last_payment_date, is_overdue"),
       fetchAll<Record<string, unknown>>(() =>
         supabase
           .from("transactions")
@@ -77,8 +85,51 @@ async function buildContext(supabase: Parameters<typeof loadFloorState>[0]) {
       }))
     : [];
 
+  // Keyed by account so a rate can be named alongside the account it belongs to
+  // rather than as a floating number.
+  const accountLabels = new Map(
+    rows.map((a) => [a.id as string, `${a.name} ‥${a.mask ?? "????"}`])
+  );
+
   return {
     as_of: new Date().toISOString().slice(0, 10),
+    // A card can carry several rates at once and the promotional one, when
+    // present, is the one being paid. Rates Plaid did not report are stated as
+    // unknown rather than omitted — a missing rate reads as 0% otherwise.
+    interest_rates: (liabilities ?? []).map((l) => {
+      const entries = (Array.isArray(l.aprs) ? l.aprs : []) as {
+        apr_type?: string;
+        apr_percentage?: number | null;
+        balance_subject_to_apr?: number | null;
+        interest_charge_amount?: number | null;
+      }[];
+      const named = entries
+        .filter((e) => typeof e.apr_percentage === "number")
+        .map((e) => ({
+          kind: e.apr_type ?? "apr",
+          rate_pct: e.apr_percentage as number,
+          balance_subject_to_this_rate: e.balance_subject_to_apr ?? null,
+          interest_charged_last_statement: e.interest_charge_amount ?? null,
+        }));
+      const promo = named.find((e) => e.kind === "special");
+      const purchase = named.find((e) => e.kind === "purchase_apr");
+      return {
+        account: accountLabels.get(l.account_id as string) ?? "unknown account",
+        // The figure that must be paid to owe no interest. Distinct from the
+        // account's current balance, which includes charges since the statement
+        // closed and is not yet owed.
+        last_statement_balance: l.last_statement_balance,
+        last_statement_issue_date: l.last_statement_issue_date,
+        last_payment_amount: l.last_payment_amount,
+        last_payment_date: l.last_payment_date,
+        is_overdue: l.is_overdue,
+        minimum_payment: l.minimum_payment,
+        next_due_date: l.next_due_date,
+        rate_being_paid_pct: promo?.rate_pct ?? purchase?.rate_pct ?? (l.apr != null ? Number(l.apr) : null),
+        on_a_promotional_rate: !!promo,
+        rates: named.length ? named : "not reported by the institution",
+      };
+    }),
     totals: {
       liquid: sum((a) => a.type === "depository"),
       credit_balances: sum((a) => a.type === "credit"),
@@ -113,6 +164,8 @@ const SYSTEM = `You are the conversational side of a self-hosted personal financ
 - A snapshot of their finances is provided as JSON. Answer from it. If the snapshot does not contain what was asked, say so plainly rather than estimating — "that isn't in what I can see" is a good answer.
 - Refer to an account by its exact \`label\`. Never pair an account name with a last-four yourself: several accounts share a name and differ only by mask.
 - Positive transaction amounts are outflows; negative are inflows.
+- \`last_statement_balance\` is what must be paid to avoid interest; the account's balance in \`accounts\` includes charges made since the statement closed and is not yet owed. Never treat the two as interchangeable, and never say interest is accruing on a card whose statement balance was paid.
+- \`interest_rates\` lists every rate a card carries, not one. \`rate_being_paid_pct\` is the one that applies now — a promotional rate overrides the purchase rate while it lasts. Where rates are "not reported by the institution", say the rate is unknown; never treat a missing rate as zero.
 - \`floors\` are limits the owner set on their own balance sheet, not suggestions. Never advise anything that would breach one, and never describe a floor's headroom as spare money without saying what it is holding back.
 - You are advisory. You cannot move money, place trades or change settings; if asked to, say what you would do and where in the app to do it.
 - Be direct and brief. This is a conversation, not a report — no preamble, no restating the question.`;
@@ -124,7 +177,45 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => null);
   const message = typeof body?.message === "string" ? body.message.trim() : "";
-  if (!message) return NextResponse.json({ error: "message required" }, { status: 400 });
+  const incoming = Array.isArray(body?.attachments) ? body.attachments : [];
+  // A file on its own is a perfectly good question ("what is this?"), so an
+  // empty message is only an error when nothing came with it.
+  if (!message && !incoming.length) {
+    return NextResponse.json({ error: "message or attachment required" }, { status: 400 });
+  }
+
+  // Validated before anything is stored or sent. An oversized or unsupported
+  // file should fail here with a reason, not as a provider error the owner
+  // cannot map back to the thing they dragged in.
+  const attachments: LlmAttachment[] = [];
+  for (const a of incoming as { name?: string; media_type?: string; data?: string }[]) {
+    const mediaType = String(a.media_type ?? "");
+    if (!ATTACHMENT_TYPES.includes(mediaType)) {
+      return NextResponse.json(
+        { error: `${a.name ?? "file"}: ${mediaType || "unknown type"} is not supported — images or PDF only` },
+        { status: 400 }
+      );
+    }
+    // Base64 with newlines is rejected by the API, and every encoder that
+    // writes to a file wraps by default. Stripped here rather than trusted.
+    const data = String(a.data ?? "").replace(/\s/g, "");
+    const bytes = Math.floor((data.length * 3) / 4);
+    if (!data) {
+      return NextResponse.json({ error: `${a.name ?? "file"}: empty` }, { status: 400 });
+    }
+    if (bytes > MAX_ATTACHMENT_BYTES) {
+      return NextResponse.json(
+        { error: `${a.name ?? "file"} is ${(bytes / 1048576).toFixed(1)} MB — the limit is ${MAX_ATTACHMENT_BYTES / 1048576} MB` },
+        { status: 400 }
+      );
+    }
+    attachments.push({
+      kind: IMAGE_TYPES.includes(mediaType) ? "image" : "pdf",
+      media_type: mediaType,
+      data,
+      name: a.name,
+    });
+  }
 
   const settings = await resolveLlmSettings(supabase, "chat");
 
@@ -152,14 +243,40 @@ export async function POST(request: Request) {
     .order("created_at")
     .limit(40);
 
-  await supabase
+  const { data: userMsg } = await supabase
     .from("conversation_messages")
-    .insert({ conversation_id: conversationId, role: "user", content: message });
+    .insert({ conversation_id: conversationId, role: "user", content: message })
+    .select("id")
+    .single();
+
+  // Bytes to Storage, metadata to Postgres. Kept rather than discarded after
+  // the call so a thread can be reopened months later and still show what was
+  // actually asked about — and so a follow-up question has the file to work
+  // from instead of only the model's memory of it.
+  for (const a of attachments) {
+    const path = `${conversationId}/${crypto.randomUUID()}-${(a.name ?? "file").replace(/[^\w.-]/g, "_")}`;
+    const { error: upErr } = await supabase.storage
+      .from("chat-attachments")
+      .upload(path, Buffer.from(a.data, "base64"), { contentType: a.media_type });
+    if (upErr) {
+      console.error(`[chat] attachment upload failed: ${upErr.message}`);
+      continue;
+    }
+    await supabase.from("conversation_attachments").insert({
+      message_id: userMsg?.id ?? null,
+      conversation_id: conversationId,
+      kind: a.kind,
+      media_type: a.media_type,
+      name: a.name ?? null,
+      bytes: Math.floor((a.data.length * 3) / 4),
+      storage_path: path,
+    });
+  }
 
   const context = await buildContext(supabase);
   const turns: ChatTurn[] = [
     ...((history ?? []) as ChatTurn[]),
-    { role: "user", content: message },
+    { role: "user", content: message || "(see the attached file)", attachments },
   ];
 
   const result = await chat(
@@ -189,7 +306,10 @@ export async function POST(request: Request) {
     error: result.error ?? null,
     provider: settings.provider,
     model: result.model,
+    effort: settings.effort ?? null,
+    thinking: settings.thinking ?? null,
     tokens: result.tokens,
+    attachments: attachments.map((a) => ({ name: a.name, kind: a.kind })),
   });
 }
 

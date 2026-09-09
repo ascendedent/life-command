@@ -38,6 +38,7 @@ export default async function OverviewPage() {
     { data: heartbeats },
     { count: pendingRecs },
     { count: goalCount },
+    { data: liabilities },
   ] = await Promise.all([
     supabase
       .from("institutions")
@@ -52,7 +53,62 @@ export default async function OverviewPage() {
       .select("*", { count: "exact", head: true })
       .eq("status", "pending"),
     supabase.from("goals").select("*", { count: "exact", head: true }),
+    // Rates live on the liability, not the account, because a card can carry
+    // several at once — purchases, cash advances, balance transfers, and a
+    // promotional rate that expires.
+    supabase
+      .from("liabilities")
+      .select("account_id, apr, aprs, minimum_payment, next_due_date, last_statement_balance, is_overdue"),
   ]);
+
+  /**
+   * The rate that actually matters on a card, and how to say so briefly.
+   *
+   * A `special` entry is a promotional rate and overrides the purchase APR for
+   * as long as it lasts, so it wins when present. Plaid does not return rates
+   * for every issuer — 7 of 16 liabilities here have none — and a blank is more
+   * honest than a zero, which would read as interest-free.
+   */
+  const ratesByAccount = new Map<
+    string,
+    {
+      headline: number | null;
+      promo: boolean;
+      all: { type: string; pct: number }[];
+      min: number | null;
+      due: string | null;
+      statement: number | null;
+      overdue: boolean;
+    }
+  >();
+  for (const l of liabilities ?? []) {
+    const entries = (Array.isArray(l.aprs) ? l.aprs : []) as {
+      apr_type?: string;
+      apr_percentage?: number | null;
+    }[];
+    const all = entries
+      .filter((e) => typeof e.apr_percentage === "number")
+      .map((e) => ({ type: e.apr_type ?? "apr", pct: e.apr_percentage as number }));
+    const promo = all.find((e) => e.type === "special");
+    const purchase = all.find((e) => e.type === "purchase_apr");
+    ratesByAccount.set(l.account_id as string, {
+      headline: promo?.pct ?? purchase?.pct ?? (l.apr != null ? Number(l.apr) : null),
+      promo: !!promo,
+      all,
+      min: l.minimum_payment != null ? Number(l.minimum_payment) : null,
+      due: (l.next_due_date as string | null) ?? null,
+      statement:
+        l.last_statement_balance != null ? Number(l.last_statement_balance) : null,
+      overdue: l.is_overdue === true,
+    });
+  }
+
+  const APR_LABEL: Record<string, string> = {
+    purchase_apr: "purchases",
+    cash_apr: "cash advances",
+    balance_transfer_apr: "balance transfers",
+    special: "promotional",
+  };
 
   const hasInstitutions = (institutions?.length ?? 0) > 0;
 
@@ -171,9 +227,52 @@ export default async function OverviewPage() {
                             )}
                           </p>
                         </div>
-                        <p className="font-mono text-sm">
-                          {fmtMoney(a.current_balance)}
-                        </p>
+                        <div className="shrink-0 text-right">
+                          <p className="font-mono text-sm">
+                            {fmtMoney(a.current_balance)}
+                          </p>
+                          {/* Rates only mean something on borrowed money. */}
+                          {(a.type === "credit" || a.type === "loan") &&
+                            (() => {
+                              const r = ratesByAccount.get(a.id);
+                              if (!r || r.headline == null) {
+                                return (
+                                  <p className="text-[11px] text-muted-foreground">
+                                    rate not reported
+                                  </p>
+                                );
+                              }
+                              return (
+                                <p
+                                  className="font-mono text-[11px] text-muted-foreground"
+                                  title={r.all
+                                    .map((e) => `${APR_LABEL[e.type] ?? e.type}: ${e.pct.toFixed(2)}%`)
+                                    .join(" · ")}
+                                >
+                                  {r.headline.toFixed(2)}% APR
+                                  {r.promo && (
+                                    <span className="text-warning"> · promo</span>
+                                  )}
+                                </p>
+                              );
+                            })()}
+                          {/* What was actually billed, which is what must be
+                              paid to owe no interest — distinct from the
+                              balance above, which includes charges made since
+                              the statement closed. */}
+                          {a.type === "credit" &&
+                            (() => {
+                              const r = ratesByAccount.get(a.id);
+                              if (!r || r.statement == null) return null;
+                              return (
+                                <p className="font-mono text-[11px] text-muted-foreground">
+                                  stmt {fmtMoney(r.statement)}
+                                  {r.due && ` · due ${new Date(r.due).toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}
+                                  {r.overdue && <span className="text-destructive"> · overdue</span>}
+                                </p>
+                              );
+                            })()}
+                        </div>
                       </div>
                     ))}
                   </div>

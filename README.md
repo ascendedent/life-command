@@ -461,6 +461,38 @@ Pointing one shared setting at it would give you free chat and a nightly agent
 that silently produces nothing, so `resolveLlmSettings` refuses to hand a
 chat-only provider to a worker and falls back with a warning.
 
+**Model and effort are set per surface** from the gear on `/chat`. The model
+list is asked of the SDK rather than hardcoded, so it reflects whatever Claude
+Code ships with — and the effort choices are the ones that model actually
+accepts. That matters because the rules are not uniform: `effort` is *rejected*
+by Haiku 4.5 rather than ignored, `budget_tokens` returns a 400 on Sonnet 5 and
+Opus 5/4.8/4.7 while Opus 4.6 still takes it, and Opus 5 only permits thinking
+to be switched off at effort `high` or below. A level a model does not support
+is stepped down or omitted before the request is built, so changing the model
+never turns a saved setting into an error.
+
+**Images and PDFs** can be attached — dropped, pasted, or picked. Bytes go to
+the private `chat-attachments` bucket (already covered by `npm run db:backup`)
+and the metadata to Postgres, so reopening a thread months later still shows
+what was asked about. Images or PDF only, 20 MB each; unsupported files are
+refused with a reason rather than dropped silently. Where a provider cannot read
+a PDF — OpenAI's chat endpoint, local Ollama models — the model is told a PDF
+was attached rather than left to answer as if nothing were there.
+
+**Interest rates and statement balances** are on the Overview beside each
+credit account, and in the chat's context. A card carries several rates at once
+— purchases, cash advances, balance transfers, and a promotional rate that
+overrides the others while it lasts — so the rate being paid is shown with the
+rest on hover. Plaid does not report rates for every issuer (9 of 16 here), and
+those read "rate not reported" rather than blank, because a missing rate should
+never look like 0%.
+
+The statement balance is shown as its own figure, distinct from the balance
+above it. They are different numbers: the statement balance is what must be paid
+to avoid interest, while the current balance includes everything charged since
+the statement closed and is not yet owed. Conflating them is how this platform
+once reported interest accruing on a card that is paid in full every month.
+
 The Agent SDK is Claude Code, which means it ships with a filesystem and a
 shell. Every tool is denied, the Claude Code system preset is replaced, and
 `settingSources: []` keeps your CLAUDE.md and permission rules out of a context

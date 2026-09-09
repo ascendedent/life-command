@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, MessageSquare, Plus, Send } from "lucide-react";
+import { FileText, ImageIcon, Loader2, MessageSquare, Paperclip, Plus, Send, Settings2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,6 +13,42 @@ interface Msg {
   role: "user" | "assistant";
   content: string;
   error?: string | null;
+  attachments?: { name?: string; kind: string }[];
+}
+
+interface Pending {
+  name: string;
+  media_type: string;
+  data: string;
+  bytes: number;
+  kind: "image" | "pdf";
+}
+
+interface ModelOption {
+  value: string;
+  label: string;
+  description?: string;
+  effortLevels: string[];
+  adaptiveThinking: boolean;
+}
+
+interface ChatSettings {
+  current: { provider: string; model: string; effort: string | null; thinking: string | null };
+  models: ModelOption[];
+  capabilities: ModelOption;
+}
+
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const MAX_BYTES = 20 * 1024 * 1024;
+
+/** Strip the `data:...;base64,` prefix — the API wants the payload alone. */
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(new Error(`could not read ${file.name}`));
+    r.readAsDataURL(file);
+  });
 }
 
 interface Thread {
@@ -38,7 +74,56 @@ export default function ChatPage() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [meta, setMeta] = useState<{ provider: string; model: string } | null>(null);
+  const [pending, setPending] = useState<Pending[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [settings, setSettings] = useState<ChatSettings | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const loadSettings = useCallback(async () => {
+    const res = await fetch("/api/chat/settings");
+    if (res.ok) setSettings(await res.json());
+  }, []);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
+
+  async function saveSetting(patch: Record<string, string | null>) {
+    await fetch("/api/chat/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    await loadSettings();
+  }
+
+  /** Shared by the file picker, drag-drop and paste. */
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    setAttachError(null);
+    const next: Pending[] = [];
+    for (const file of Array.from(files)) {
+      const isImage = IMAGE_TYPES.includes(file.type);
+      const isPdf = file.type === "application/pdf";
+      if (!isImage && !isPdf) {
+        setAttachError(`${file.name}: images or PDF only`);
+        continue;
+      }
+      if (file.size > MAX_BYTES) {
+        setAttachError(`${file.name} is ${(file.size / 1048576).toFixed(1)} MB — the limit is 20 MB`);
+        continue;
+      }
+      next.push({
+        name: file.name,
+        media_type: file.type,
+        data: await readAsBase64(file),
+        bytes: file.size,
+        kind: isImage ? "image" : "pdf",
+      });
+    }
+    if (next.length) setPending((p) => [...p, ...next]);
+  }, []);
 
   const loadThreads = useCallback(async () => {
     const res = await fetch("/api/chat");
@@ -67,24 +152,41 @@ export default function ChatPage() {
     setConversationId(null);
     setMessages([]);
     setMeta(null);
+    setPending([]);
+    setAttachError(null);
   }
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const message = draft.trim();
-    if (!message || busy) return;
+    // A file on its own is a fair question — "what is this?" — so only block
+    // when there is neither text nor attachment.
+    if ((!message && !pending.length) || busy) return;
+    const sending = pending;
     setDraft("");
+    setPending([]);
     // Shown immediately: the round trip can take seconds on a local model, and
     // an input that empties with nothing appearing looks like a dropped message.
-    setMessages((m) => [...m, { role: "user", content: message }]);
+    setMessages((m) => [
+      ...m,
+      { role: "user", content: message, attachments: sending.map((f) => ({ name: f.name, kind: f.kind })) },
+    ]);
     setBusy(true);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, conversation_id: conversationId }),
+        body: JSON.stringify({
+          message,
+          conversation_id: conversationId,
+          attachments: sending.map(({ name, media_type, data }) => ({ name, media_type, data })),
+        }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        setMessages((m) => [...m, { role: "assistant", content: "", error: data.error }]);
+        return;
+      }
       setConversationId(data.conversation_id ?? conversationId);
       setMeta({ provider: data.provider, model: data.model });
       setMessages((m) => [
@@ -132,14 +234,92 @@ export default function ChatPage() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="mb-3 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between gap-2">
           <h1 className="text-xl font-semibold">Chat</h1>
-          {meta && (
-            <Badge variant="outline">
-              {PROVIDER_LABEL[meta.provider] ?? meta.provider} · {meta.model}
-            </Badge>
-          )}
+          <div className="flex items-center gap-2">
+            {(meta || settings) && (
+              <Badge variant="outline">
+                {PROVIDER_LABEL[(meta ?? settings!.current).provider] ??
+                  (meta ?? settings!.current).provider}{" "}
+                · {(meta ?? settings!.current).model}
+                {settings?.current.effort ? ` · ${settings.current.effort}` : ""}
+              </Badge>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowSettings((v) => !v)}
+              aria-label="Model settings"
+            >
+              <Settings2 className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
+
+        {showSettings && settings && (
+          <Card className="mb-3">
+            <CardContent className="space-y-3 p-4">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  Model
+                  <select
+                    className="block h-8 rounded-md border bg-background px-2 text-sm"
+                    value={settings.current.model}
+                    onChange={(e) => saveSetting({ model: e.target.value })}
+                  >
+                    {settings.models.length === 0 && (
+                      <option value={settings.current.model}>{settings.current.model}</option>
+                    )}
+                    {settings.models.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  Reasoning effort
+                  <select
+                    className="block h-8 rounded-md border bg-background px-2 text-sm disabled:opacity-50"
+                    value={settings.current.effort ?? ""}
+                    disabled={settings.capabilities.effortLevels.length === 0}
+                    onChange={(e) => saveSetting({ effort: e.target.value || null })}
+                  >
+                    <option value="">provider default</option>
+                    {/* Only the levels this model accepts. Offering one it
+                        rejects would turn a settings change into a 400. */}
+                    {settings.capabilities.effortLevels.map((l) => (
+                      <option key={l} value={l}>
+                        {l}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  Thinking
+                  <select
+                    className="block h-8 rounded-md border bg-background px-2 text-sm disabled:opacity-50"
+                    value={settings.current.thinking ?? ""}
+                    disabled={!settings.capabilities.adaptiveThinking}
+                    onChange={(e) => saveSetting({ thinking: e.target.value || null })}
+                  >
+                    <option value="">provider default</option>
+                    <option value="adaptive">adaptive</option>
+                    <option value="off">off</option>
+                  </select>
+                </label>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                {settings.capabilities.effortLevels.length === 0
+                  ? `${settings.current.model} does not accept an effort level — it is left off rather than sent and rejected.`
+                  : `Higher effort means more reasoning and more tokens. Chat usually does well at low or medium; the workers are configured separately.`}
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
           {messages.length === 0 && !busy && (
@@ -177,6 +357,23 @@ export default function ChatPage() {
                       : "border bg-muted/40"
                 )}
               >
+                {m.attachments && m.attachments.length > 0 && (
+                  <div className="mb-1.5 flex flex-wrap gap-1.5">
+                    {m.attachments.map((f, j) => (
+                      <span
+                        key={j}
+                        className="inline-flex items-center gap-1 rounded border border-current/20 px-1.5 py-0.5 text-[11px] opacity-80"
+                      >
+                        {f.kind === "image" ? (
+                          <ImageIcon className="h-3 w-3" />
+                        ) : (
+                          <FileText className="h-3 w-3" />
+                        )}
+                        {f.name ?? f.kind}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {m.content}
                 {m.error && (
                   <p className={cn("text-xs text-destructive", m.content && "mt-2")}>
@@ -195,17 +392,87 @@ export default function ChatPage() {
           <div ref={endRef} />
         </div>
 
-        <form onSubmit={send} className="mt-3 flex gap-2">
-          <Input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Ask about your finances…"
-            disabled={busy}
-            autoFocus
-          />
-          <Button type="submit" disabled={busy || !draft.trim()}>
-            <Send className="h-4 w-4" />
-          </Button>
+        <form
+          onSubmit={send}
+          className="mt-3 space-y-2"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
+          }}
+        >
+          {pending.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {pending.map((f, i) => (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1 text-xs"
+                >
+                  {f.kind === "image" ? (
+                    <ImageIcon className="h-3.5 w-3.5" />
+                  ) : (
+                    <FileText className="h-3.5 w-3.5" />
+                  )}
+                  <span className="max-w-[180px] truncate">{f.name}</span>
+                  <span className="text-muted-foreground">
+                    {(f.bytes / 1024).toFixed(0)} KB
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPending((p) => p.filter((_, j) => j !== i))}
+                    className="text-muted-foreground hover:text-destructive"
+                    aria-label={`Remove ${f.name}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {attachError && <p className="text-xs text-destructive">{attachError}</p>}
+
+          <div className="flex gap-2">
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              accept="image/png,image/jpeg,image/webp,image/gif,application/pdf"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.length) addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              disabled={busy}
+              onClick={() => fileRef.current?.click()}
+              aria-label="Attach a file"
+            >
+              <Paperclip className="h-4 w-4" />
+            </Button>
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              // Screenshotting a statement and hitting paste is the fastest
+              // path to "what is this charge", so it is a first-class one.
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.files ?? []);
+                if (files.length) {
+                  e.preventDefault();
+                  addFiles(files);
+                }
+              }}
+              placeholder="Ask about your finances, or drop in a statement…"
+              disabled={busy}
+              autoFocus
+            />
+            <Button type="submit" disabled={busy || (!draft.trim() && !pending.length)}>
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
         </form>
       </div>
     </div>

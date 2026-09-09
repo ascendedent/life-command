@@ -27,10 +27,84 @@ import { z } from "zod";
 export type LlmProvider = "claude_code" | "anthropic" | "google" | "openai" | "ollama";
 export type LlmAuth = "api_key" | "oauth" | "none";
 
+export type LlmEffort = "low" | "medium" | "high" | "xhigh" | "max";
+/** Normalised across providers; each maps it to whatever it actually calls this. */
+export type LlmThinking = "adaptive" | "off";
+
 export interface LlmSettings {
   provider: LlmProvider;
   model: string;
   auth: LlmAuth;
+  /** Omitted means the provider default (`high` on Anthropic). */
+  effort?: LlmEffort;
+  thinking?: LlmThinking;
+}
+
+/**
+ * What a given model will actually accept — because sending the wrong thing is
+ * a 400, not a shrug.
+ *
+ * The rules are not uniform and not guessable:
+ *   - `effort` errors outright on Haiku 4.5.
+ *   - `budget_tokens` is *removed* on Sonnet 5, Opus 5, 4.8 and 4.7 — sending
+ *     it returns 400 — while Opus 4.6 and Sonnet 4.6 still accept it and Haiku
+ *     4.5 *requires* it for any thinking at all.
+ *   - Opus 5 thinks by default and only accepts `disabled` at effort `high` or
+ *     below; pairing `disabled` with `xhigh`/`max` is a 400.
+ *
+ * An unknown model gets the conservative row: no effort, no thinking config.
+ * A request that omits both is valid on every model, so an unrecognised id
+ * degrades to "works" rather than to a stack trace.
+ */
+export interface ModelCapability {
+  /** Null when the parameter is rejected rather than merely ignored. */
+  effort: LlmEffort[] | null;
+  /** How this model expresses thinking, if at all. */
+  thinking: "adaptive" | "budget" | "none";
+  /** Whether thinking may be switched off, and under what condition. */
+  disableThinking: "yes" | "no" | "effort-high-or-below";
+}
+
+const ALL_EFFORT: LlmEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+/** Named levels mapped onto Gemini's token budget. -1 lets the model decide. */
+const GEMINI_BUDGET: Record<LlmEffort, number> = {
+  low: 1024, medium: 4096, high: 8192, xhigh: 16384, max: -1,
+};
+const NO_MAX: LlmEffort[] = ["low", "medium", "high", "xhigh"];
+
+export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
+  "claude-opus-5": { effort: ALL_EFFORT, thinking: "adaptive", disableThinking: "effort-high-or-below" },
+  "claude-opus-4-8": { effort: NO_MAX, thinking: "adaptive", disableThinking: "yes" },
+  "claude-opus-4-7": { effort: NO_MAX, thinking: "adaptive", disableThinking: "yes" },
+  "claude-opus-4-6": { effort: ["low", "medium", "high", "max"], thinking: "adaptive", disableThinking: "yes" },
+  "claude-sonnet-5": { effort: NO_MAX, thinking: "adaptive", disableThinking: "yes" },
+  "claude-sonnet-4-6": { effort: ["low", "medium", "high", "max"], thinking: "adaptive", disableThinking: "yes" },
+  // Effort is not merely ignored here — it errors. Thinking needs a token budget.
+  "claude-haiku-4-5": { effort: null, thinking: "budget", disableThinking: "yes" },
+};
+
+const CONSERVATIVE: ModelCapability = { effort: null, thinking: "none", disableThinking: "yes" };
+
+export function capabilitiesOf(model: string): ModelCapability {
+  return MODEL_CAPABILITIES[model] ?? CONSERVATIVE;
+}
+
+/**
+ * The effort actually sendable to a model: clamped to what it supports, or
+ * undefined when it supports none. Silently dropping an unsupported level
+ * beats a 400 the owner cannot act on from a settings page.
+ */
+export function effortFor(model: string, want: LlmEffort | undefined): LlmEffort | undefined {
+  if (!want) return undefined;
+  const levels = capabilitiesOf(model).effort;
+  if (!levels) return undefined;
+  if (levels.includes(want)) return want;
+  // Step down to the highest level this model does support.
+  for (let i = ALL_EFFORT.indexOf(want); i >= 0; i--) {
+    if (levels.includes(ALL_EFFORT[i])) return ALL_EFFORT[i];
+  }
+  return levels[0];
 }
 
 export interface LlmResult<T> {
@@ -442,7 +516,7 @@ export async function resolveLlmSettings(
 ): Promise<LlmSettings> {
   const { data } = await db
     .from("app_settings")
-    .select("llm_provider, llm_auth, llm_chat_provider, llm_chat_auth")
+    .select("llm_provider, llm_auth, llm_chat_provider, llm_chat_auth, llm_chat_model, llm_chat_effort, llm_chat_thinking")
     .eq("id", 1)
     .maybeSingle();
 
@@ -468,6 +542,21 @@ export async function resolveLlmSettings(
     (provider === "anthropic" ? process.env.AGENT_MODEL : undefined) ||
     DEFAULT_MODELS[provider];
 
+  // Chat carries its own model and effort; the workers keep the env-var
+  // overrides they already had. Effort is clamped to what the chosen model
+  // accepts — see effortFor — so a setting that is valid for one model does not
+  // become a 400 when the model changes underneath it.
+  if (role === "chat") {
+    const chatModel = (data?.llm_chat_model as string) || model;
+    return {
+      provider,
+      model: chatModel,
+      auth,
+      effort: effortFor(chatModel, (data?.llm_chat_effort as LlmEffort) ?? undefined),
+      thinking: (data?.llm_chat_thinking as LlmThinking) ?? undefined,
+    };
+  }
+
   return { provider, model, auth };
 }
 
@@ -475,9 +564,58 @@ export async function resolveLlmSettings(
 // Conversation
 // ---------------------------------------------------------------------------
 
+/**
+ * A file sent with a turn. `data` is base64 with **no newlines** — the API
+ * rejects wrapped base64, and every encoder that writes to a file wraps by
+ * default, so this is stripped at the boundary rather than trusted.
+ */
+export interface LlmAttachment {
+  kind: "image" | "pdf";
+  media_type: string;
+  data: string;
+  name?: string;
+}
+
 export interface ChatTurn {
   role: "user" | "assistant";
   content: string;
+  attachments?: LlmAttachment[];
+}
+
+export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+export const ATTACHMENT_TYPES = [...IMAGE_TYPES, "application/pdf"];
+/** Per file. The whole request is capped at 32 MB, so this leaves headroom. */
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Anthropic content blocks for one turn.
+ *
+ * Documents go **before** the text, which is the documented placement and not
+ * cosmetic — a PDF after the question is materially worse at being read as the
+ * subject of it.
+ */
+function anthropicBlocks(turn: ChatTurn): unknown[] {
+  const blocks: unknown[] = [];
+  for (const a of turn.attachments ?? []) {
+    blocks.push(
+      a.kind === "pdf"
+        ? {
+            type: "document",
+            source: { type: "base64", media_type: "application/pdf", data: a.data },
+          }
+        : {
+            type: "image",
+            source: { type: "base64", media_type: a.media_type, data: a.data },
+          }
+    );
+  }
+  blocks.push({ type: "text", text: turn.content });
+  return blocks;
+}
+
+/** True when any turn carries a file, so text-only paths stay untouched. */
+function hasAttachments(turns: ChatTurn[]): boolean {
+  return turns.some((t) => t.attachments?.length);
 }
 
 export interface ChatResult {
@@ -506,25 +644,54 @@ export interface ChatResult {
 async function claudeCodeChat(
   system: string,
   turns: ChatTurn[],
-  model: string
+  settings: LlmSettings
 ): Promise<ChatResult> {
+  const model = settings.model;
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
-  // The SDK takes a single prompt rather than a message array, so the history
-  // is rendered into it. Labelled explicitly: an unlabelled transcript reads as
-  // one enormous user message and the model loses track of who said what.
-  const transcript = turns
-    .map((t) => `${t.role === "user" ? "Owner" : "You"}: ${t.content}`)
-    .join("\n\n");
+  // Two shapes, because the SDK accepts either.
+  //
+  // Text-only turns render into a single labelled transcript — an unlabelled
+  // one reads as one enormous user message and the model loses track of who
+  // said what. But a transcript is a string, and a string cannot carry an
+  // image, so any turn with a file switches to the streaming form: real
+  // MessageParams with real content blocks, which is what the SDK wanted all
+  // along and the only way an attachment reaches the model at all.
+  const prompt = hasAttachments(turns)
+    ? (async function* () {
+        for (const t of turns) {
+          yield {
+            type: "user" as const,
+            message: {
+              role: "user" as const,
+              content: (t.role === "user"
+                ? anthropicBlocks(t)
+                : [{ type: "text", text: `You previously said: ${t.content}` }]) as never,
+            },
+            parent_tool_use_id: null,
+            session_id: "",
+          };
+        }
+      })()
+    : turns.map((t) => `${t.role === "user" ? "Owner" : "You"}: ${t.content}`).join("\n\n");
 
   let reply = "";
   let tokens = 0;
   try {
     for await (const message of query({
-      prompt: transcript,
+      prompt: prompt as never,
       options: {
         systemPrompt: system,
         model,
+        // The SDK takes the same vocabulary as the API. It resolves aliases
+        // ("sonnet") itself and silently downgrades an effort level the chosen
+        // model does not support, so this can be passed through as written.
+        ...(settings.effort ? { effort: settings.effort } : {}),
+        ...(settings.thinking === "off"
+          ? { thinking: { type: "disabled" as const } }
+          : settings.thinking === "adaptive"
+            ? { thinking: { type: "adaptive" as const } }
+            : {}),
         // Not a coding agent here.
         allowedTools: [],
         disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
@@ -556,11 +723,40 @@ async function anthropicChat(
   settings: LlmSettings
 ): Promise<ChatResult> {
   const client = await anthropicClient(settings.auth);
+  const caps = capabilitiesOf(settings.model);
+  const effort = effortFor(settings.model, settings.effort);
+
+  // Thinking off is only expressible where the model allows it, and on Opus 5
+  // only at effort `high` or below — pairing `disabled` with `xhigh`/`max` is a
+  // 400. Where it cannot be expressed the request simply omits it, which every
+  // model accepts.
+  const canDisable =
+    caps.disableThinking === "yes" ||
+    (caps.disableThinking === "effort-high-or-below" &&
+      (!effort || effort === "low" || effort === "medium" || effort === "high"));
+
+  const thinking =
+    settings.thinking === "off"
+      ? canDisable
+        ? { type: "disabled" as const }
+        : undefined
+      : caps.thinking === "adaptive"
+        ? { type: "adaptive" as const }
+        : undefined;
+
   const res = await client.messages.create({
     model: settings.model,
     max_tokens: 4000,
     system,
-    messages: turns.map((t) => ({ role: t.role, content: t.content })),
+    // effort lives inside output_config, not at the top level, and is omitted
+    // entirely for models that reject it (Haiku 4.5 errors rather than ignores).
+    ...(effort ? { output_config: { effort } } : {}),
+    ...(thinking ? { thinking } : {}),
+    messages: turns.map((t) =>
+      t.attachments?.length
+        ? { role: t.role, content: anthropicBlocks(t) as never }
+        : { role: t.role, content: t.content }
+    ),
   });
   const reply = res.content
     .filter((b): b is { type: "text"; text: string; citations: never } => b.type === "text")
@@ -588,7 +784,7 @@ export async function chat(
   try {
     switch (settings.provider) {
       case "claude_code":
-        return await claudeCodeChat(system, turns, settings.model);
+        return await claudeCodeChat(system, turns, settings);
       case "anthropic":
         return await anthropicChat(system, turns, settings);
       case "google": {
@@ -600,9 +796,24 @@ export async function chat(
             systemInstruction: { parts: [{ text: system }] },
             contents: turns.map((t) => ({
               role: t.role === "assistant" ? "model" : "user",
-              parts: [{ text: t.content }],
+              parts: [
+                ...(t.attachments ?? []).map((a) => ({
+                  inlineData: { mimeType: a.media_type, data: a.data },
+                })),
+                { text: t.content },
+              ],
             })),
-            generationConfig: { maxOutputTokens: 4000 },
+            generationConfig: {
+              maxOutputTokens: 4000,
+              // Gemini expresses this as a thinking budget, not a named level:
+              // -1 lets it decide, 0 turns it off. The named levels are mapped
+              // onto that rather than invented.
+              ...(settings.thinking === "off"
+                ? { thinkingConfig: { thinkingBudget: 0 } }
+                : settings.effort
+                  ? { thinkingConfig: { thinkingBudget: GEMINI_BUDGET[settings.effort] } }
+                  : {}),
+            },
           },
           { "x-goog-api-key": key }
         );
@@ -621,7 +832,35 @@ export async function chat(
           {
             model: settings.model,
             max_completion_tokens: 4000,
-            messages: [{ role: "system", content: system }, ...turns],
+            // OpenAI has three levels, not five; xhigh and max fold into high.
+            ...(settings.effort
+              ? { reasoning_effort: settings.effort === "low" ? "low" : settings.effort === "medium" ? "medium" : "high" }
+              : {}),
+            messages: [
+              { role: "system", content: system },
+              ...turns.map((t) =>
+                t.attachments?.length
+                  ? {
+                      role: t.role,
+                      content: [
+                        { type: "text", text: t.content },
+                        // Chat Completions takes images as data URIs and does
+                        // not take PDFs at all; dropping one silently would be
+                        // worse than the model not seeing it, so say so inline.
+                        ...t.attachments
+                          .filter((a) => a.kind === "image")
+                          .map((a) => ({
+                            type: "image_url",
+                            image_url: { url: `data:${a.media_type};base64,${a.data}` },
+                          })),
+                        ...(t.attachments.some((a) => a.kind === "pdf")
+                          ? [{ type: "text", text: "[a PDF was attached; this provider cannot read PDFs on this endpoint]" }]
+                          : []),
+                      ],
+                    }
+                  : { role: t.role, content: t.content }
+              ),
+            ],
           },
           { Authorization: `Bearer ${key}` }
         );
@@ -638,7 +877,21 @@ export async function chat(
           {
             model: settings.model,
             stream: false,
-            messages: [{ role: "system", content: system }, ...turns],
+            // Ollama has a boolean, not a scale — anything but "off" is on, and
+            // only some local models honour it at all.
+            ...(settings.thinking ? { think: settings.thinking !== "off" } : {}),
+            messages: [
+              { role: "system", content: system },
+              ...turns.map((t) => ({
+                role: t.role,
+                content: t.attachments?.some((a) => a.kind === "pdf")
+                  ? `${t.content}\n\n[a PDF was attached; local models here cannot read PDFs]`
+                  : t.content,
+                ...(t.attachments?.some((a) => a.kind === "image")
+                  ? { images: t.attachments.filter((a) => a.kind === "image").map((a) => a.data) }
+                  : {}),
+              })),
+            ],
           },
           {}
         );

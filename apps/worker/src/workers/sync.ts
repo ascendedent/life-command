@@ -283,7 +283,16 @@ async function syncInstitution(
           apr: apr?.apr_percentage ?? null,
           minimum_payment: c.minimum_payment_amount ?? null,
           next_due_date: c.next_payment_due_date ?? null,
+          // `balance` is the legacy name for this figure; both are written so
+          // existing readers keep working while new ones can say what they mean.
           balance: c.last_statement_balance ?? null,
+          last_statement_balance: c.last_statement_balance ?? null,
+          last_statement_issue_date: c.last_statement_issue_date ?? null,
+          last_payment_amount: c.last_payment_amount ?? null,
+          last_payment_date: c.last_payment_date ?? null,
+          // Plaid's flag, not ours. Whether a payment is late depends on the
+          // issuer's posting, which a due date and a clock cannot settle.
+          is_overdue: c.is_overdue ?? null,
         }, { onConflict: "account_id,type" });
       }
       for (const s of liab.data.liabilities.student ?? []) {
