@@ -10,6 +10,7 @@ export * from "./guardrails";
 export * from "./execution-readiness";
 export * from "./floors";
 export * from "./llm";
+export * from "./finance-query";
 export * from "./pay-period";
 export * from "./receipt-items";
 export * from "./receipt-split";

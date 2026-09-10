@@ -618,6 +618,14 @@ function hasAttachments(turns: ChatTurn[]): boolean {
   return turns.some((t) => t.attachments?.length);
 }
 
+/**
+ * A database handle the chat may query through its tools. Optional: without it
+ * the chat still works, it just cannot look past the snapshot it was given.
+ */
+export interface ChatTools {
+  db: unknown;
+}
+
 export interface ChatResult {
   reply: string | null;
   tokens: number;
@@ -641,10 +649,71 @@ export interface ChatResult {
  * owner's CLAUDE.md and permission rules out of a context that has no business
  * seeing them. What is left is a plain model call with a subscription behind it.
  */
+/**
+ * The finance tools, as an in-process MCP server.
+ *
+ * Nothing here touches the filesystem or the shell — they are three read-only
+ * queries against the owner's own data, and they exist so the model can look
+ * things up instead of being handed the whole book on every turn. 3,000
+ * transactions is ~75k tokens of mostly-irrelevant context per message, and it
+ * still could not answer a question about one merchant in one month, because
+ * whatever summary fits has already discarded the detail.
+ */
+async function financeToolServer(db: unknown) {
+  const { createSdkMcpServer, tool } = await import("@anthropic-ai/claude-agent-sdk");
+  const { z } = await import("zod");
+  const q = await import("./finance-query");
+  const asDb = db as Parameters<typeof q.searchTransactions>[0];
+  const json = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v) }] });
+
+  return createSdkMcpServer({
+    name: "finance",
+    tools: [
+      tool(
+        "list_accounts",
+        "Every account the owner holds, with its balance, who it belongs to, and for credit accounts the interest rate, statement balance and due date. Call this first to learn which accounts exist and what to pass as `account` to search_transactions.",
+        {},
+        async () => json(await q.listAccounts(asDb))
+      ),
+      tool(
+        "search_transactions",
+        "Individual transactions over the full history. Filter by date range, merchant, category, account and amount. Positive amounts are money leaving; negative are money arriving.",
+        {
+          from: z.string().optional().describe("ISO date, inclusive, e.g. 2026-01-01"),
+          to: z.string().optional().describe("ISO date, inclusive"),
+          merchant: z.string().optional().describe("substring, matched against both the cleaned and raw descriptor"),
+          category: z.string().optional(),
+          account: z.string().optional().describe("the last four digits for an exact account, or part of its name"),
+          min_amount: z.number().optional(),
+          max_amount: z.number().optional(),
+          direction: z.enum(["out", "in", "any"]).optional(),
+          include_transfers: z.boolean().optional().describe("default false — a transfer is the same dollar counted twice"),
+          limit: z.number().optional().describe("default 50, maximum 300"),
+        },
+        async (args) => json(await q.searchTransactions(asDb, args as never))
+      ),
+      tool(
+        "spending_summary",
+        "Totals over any date range, grouped by category, merchant, month or account. Use this rather than summing transactions by hand.",
+        {
+          from: z.string().optional(),
+          to: z.string().optional(),
+          group_by: z.enum(["category", "merchant", "month", "account"]),
+          direction: z.enum(["out", "in"]).optional(),
+          include_transfers: z.boolean().optional(),
+          limit: z.number().optional(),
+        },
+        async (args) => json(await q.spendingSummary(asDb, args as never))
+      ),
+    ],
+  });
+}
+
 async function claudeCodeChat(
   system: string,
   turns: ChatTurn[],
-  settings: LlmSettings
+  settings: LlmSettings,
+  tools?: ChatTools
 ): Promise<ChatResult> {
   const model = settings.model;
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -692,12 +761,25 @@ async function claudeCodeChat(
           : settings.thinking === "adaptive"
             ? { thinking: { type: "adaptive" as const } }
             : {}),
-        // Not a coding agent here.
-        allowedTools: [],
-        disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"],
+        // Not a coding agent here. The only tools that exist are the three
+        // read-only finance queries below; everything Claude Code ships with
+        // stays denied by name as well, so a future default cannot quietly
+        // hand a conversation about groceries a shell.
+        ...(tools?.db
+          ? {
+              mcpServers: { finance: await financeToolServer(tools.db) },
+              allowedTools: [
+                "mcp__finance__list_accounts",
+                "mcp__finance__search_transactions",
+                "mcp__finance__spending_summary",
+              ],
+              // Enough turns to look something up, then answer.
+              maxTurns: 8,
+            }
+          : { allowedTools: [] }),
+        disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task"],
         permissionMode: "default",
         settingSources: [],
-        maxTurns: 1,
       },
     } as never)) {
       const m = message as { type?: string; message?: { content?: unknown; usage?: Record<string, number> } };
@@ -779,12 +861,13 @@ async function anthropicChat(
 export async function chat(
   settings: LlmSettings,
   system: string,
-  turns: ChatTurn[]
+  turns: ChatTurn[],
+  tools?: ChatTools
 ): Promise<ChatResult> {
   try {
     switch (settings.provider) {
       case "claude_code":
-        return await claudeCodeChat(system, turns, settings);
+        return await claudeCodeChat(system, turns, settings, tools);
       case "anthropic":
         return await anthropicChat(system, turns, settings);
       case "google": {

@@ -461,6 +461,29 @@ Pointing one shared setting at it would give you free chat and a nightly agent
 that silently produces nothing, so `resolveLlmSettings` refuses to hand a
 chat-only provider to a worker and falls back with a warning.
 
+**The chat can query the whole book, not just what fits in a prompt.** It is
+given a 90-day snapshot for orientation and three read-only tools for
+everything else: `list_accounts` (every account, with its mask, balance, and for
+credit its rate, statement balance and due date), `search_transactions` (any
+date range, merchant, category, account or amount across the full history), and
+`spending_summary` (totals grouped by category, merchant, month or account).
+
+Handing it the history instead would be ~75k tokens per turn of mostly
+irrelevant context, and it still could not answer a question about one merchant
+in one month — whatever summary fits has already discarded the detail. To ask
+about one card, give its last four digits: several accounts share a name and
+differ only by the mask, so the digits are the only exact identifier.
+
+Every filter runs in SQL. That sounds like an implementation note and is not: an
+earlier version applied `limit` in the database and filtered by account
+afterwards, so asking for one card returned the most recent rows across *all*
+accounts and kept whichever happened to match — reporting "0 transactions" for a
+card with a four-figure statement balance, confidently. A wrong answer delivered
+calmly is worse than an error when a model is reasoning from it.
+
+The tools run under the owner's own session, so RLS applies to them exactly as
+it does to the pages.
+
 **Model and effort are set per surface** from the gear on `/chat`. The model
 list is asked of the SDK rather than hardcoded, so it reflects whatever Claude
 Code ships with — and the effort choices are the ones that model actually
