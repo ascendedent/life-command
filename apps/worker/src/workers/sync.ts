@@ -5,6 +5,7 @@ import {
   plaidError,
   decryptSecret,
   categorizeTransaction,
+  linkCardPayments,
   merchantKey,
   type CategorizeContext,
   type TxnRule,
@@ -430,6 +431,22 @@ export async function runSync(
       });
     }
   }
+  // Runs after every institution, not per-institution: the two legs of a card
+  // payment usually live at different banks, so the match only exists once all
+  // of them have been pulled.
+  try {
+    const { linked, pairs } = await linkCardPayments(db);
+    if (linked) {
+      console.log(`[sync] linked ${linked} card payment(s) that had been read as spending`);
+      for (const x of pairs.slice(0, 10)) {
+        console.log(`[sync]   ${x.date} $${x.amount.toFixed(2)} ${x.merchant ?? "?"} -> ${x.card}`);
+      }
+    }
+  } catch (e: unknown) {
+    // Never fail a sync over this — the transactions are already saved.
+    console.error(`[sync] card payment linking failed: ${(e as Error).message}`);
+  }
+
   await snapshotNetWorth(db);
 }
 
