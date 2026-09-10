@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Scan text on stdin for personal data. Prints findings, exits 1 if any.
+#
+# Shared by pre-commit (staged diff) and commit-msg (the message). Both had to
+# be covered: the checks originally read only the staged diff, so a commit whose
+# code was clean could still publish real balances in its own message, and did.
+#
+# Bypass a genuine false positive with:  git commit --no-verify
+set -uo pipefail
+
+text=$(cat)
+[ -z "$text" ] && exit 0
+
+fail=0
+flag() { printf '  ✗ %s\n     %s\n' "$1" "$2"; fail=1; }
+
+# Secrets, matched with enough trailing key material to be a real key rather
+# than a mention of one. Matching the bare prefix flagged this hook's own
+# source and the README documenting it — a check that cries wolf on its own
+# definition is a check people learn to pass with --no-verify.
+secrets=$(grep -oE 'sk-ant-[A-Za-z0-9_-]{24,}|eyJhbGciOi[A-Za-z0-9_-]{24,}|GOCSPX-[A-Za-z0-9_-]{20,}' <<< "$text" || true)
+[ -n "$secrets" ] && flag "API key or token" "$(head -2 <<< "$secrets" | cut -c1-28 | tr '\n' ' ')"
+
+# Real email addresses. example.com and the placeholder domains are fine.
+emails=$(grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' <<< "$text" \
+  | grep -viE '@(example|test|localhost|acme)\.|@your-|noreply@|@sentry\.io' || true)
+[ -n "$emails" ] && flag "email address" "$(head -3 <<< "$emails" | tr '\n' ' ')"
+
+# Long digit runs: account, routing and transaction reference numbers.
+# A run of one repeated digit is a sentinel or a placeholder, never an account
+# number — the all-zero UUID used as a SQL sentinel tripped this and there is no
+# version of that string worth protecting.
+digits=$(grep -oE '\b[0-9]{9,}\b' <<< "$text" \
+  | grep -vE '^1[0-9]{12}$' \
+  | grep -vE '^(0+|1+|2+|3+|4+|5+|6+|7+|8+|9+)$' || true)
+[ -n "$digits" ] && flag "9+ digit number (account/reference?)" "$(head -3 <<< "$digits" | tr '\n' ' ')"
+
+# Account masks. Four digits are far too short to catch by length, so they are
+# caught by the shapes this codebase actually writes them in — the ‥NNNN the UI
+# uses, and the ...NNNN / xNNNN a comment reaches for.
+#
+# Obvious placeholders are exempt for the same reason the digit rule exempts a
+# repeated run: this check blocked the README paragraph documenting it, and a
+# guard that fails on its own documentation teaches people to reach for
+# --no-verify.
+masks=$(grep -oE '(‥|\.\.\.|[xX*]{2,})[0-9]{4}\b' <<< "$text" \
+  | grep -vE '(0000|1111|2222|3333|4444|5555|6666|7777|8888|9999)$' \
+  | grep -vE '(0123|1234|2345|3456|4567|5678|6789|9876|8765|7654|6543|5432|4321|3210)$' || true)
+[ -n "$masks" ] && flag "account mask" "$(head -3 <<< "$masks" | tr '\n' ' ')"
+
+# Money with cents. A round figure is nearly always a generic example — a rate
+# cap, a limit, a threshold — but cents come off a statement. This is the check
+# that would have caught real balances being narrated in commit messages.
+money=$(grep -oE '\$[0-9][0-9,]*\.[0-9]{2}\b' <<< "$text" || true)
+[ -n "$money" ] && flag "money with cents (a real balance?)" "$(head -3 <<< "$money" | tr '\n' ' ')"
+
+# Whatever this install has decided is personal.
+if [ -f .pii-denylist ]; then
+  while IFS= read -r term; do
+    [ -z "$term" ] && continue
+    case "$term" in \#*) continue ;; esac
+    if grep -qiF "$term" <<< "$text"; then
+      flag "denylisted term" "$term"
+    fi
+  done < .pii-denylist
+fi
+
+exit $fail

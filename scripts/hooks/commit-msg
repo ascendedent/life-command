@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Refuse to publish personal data in a commit message.
+#
+# The pre-commit check reads only the staged diff, so a commit whose code was
+# clean could still narrate real balances in its own message — and did, for
+# eight commits, because explaining why a heuristic was wrong is easiest with
+# the figures that broke it. A message is as public as the code.
+#
+# Bypass for a genuine false positive:  git commit --no-verify
+set -uo pipefail
+
+# Strip the comment block git appends; it lists changed filenames and branch
+# names that are not the author's prose to answer for.
+msg=$(grep -v '^#' "$1" || true)
+[ -z "$msg" ] && exit 0
+
+if ! printf '%s' "$msg" | "$(dirname "$0")/pii-scan"; then
+  echo
+  echo "Commit blocked: the message looks like it contains personal data."
+  echo "Describe the failure, not the figures that produced it."
+  echo "If it is genuinely a false positive: git commit --no-verify"
+  exit 1
+fi
+exit 0

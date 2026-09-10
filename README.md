@@ -263,9 +263,17 @@ four digits everywhere, including in anything sent to a model.
 This repository is public and the app runs on real financial data, so the two
 must not meet.
 
+- **`scripts/hooks/commit-msg`** applies the same checks to the commit message.
+  The content check reads only the staged diff, so a commit whose code is clean
+  can still publish real figures in its own prose — explaining why a heuristic
+  was wrong is easiest with the numbers that broke it, and those numbers come
+  off a statement.
 - **`scripts/hooks/pre-commit`** blocks staged secrets (`sk-ant-`, JWTs,
   Google client secrets), email addresses, 9-or-more-digit numbers that look
-  like account or reference numbers, and any term in `.pii-denylist`.
+  like account or reference numbers, account masks (`‥1234`, `...1234`),
+  money written with cents (a round figure is usually a generic cap; cents come
+  off a statement), and any term in `.pii-denylist`. Both hooks share the rules
+  in `scripts/hooks/pii-scan`.
 - **Enable it on a fresh clone:** `git config core.hooksPath scripts/hooks`
 - **`.pii-denylist`** is gitignored — the list of things you must not publish
   is itself something you must not publish. One term per line:
