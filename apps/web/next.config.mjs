@@ -13,16 +13,13 @@
  * bound to localhost where it was. The browser client builds its URL from
  * whatever origin the page was served from, so the same build works from
  * localhost, a LAN address, or a Tailscale name with nothing to reconfigure.
+ *
+ * The proxy itself is a route handler (src/app/supabase/[...path]/route.ts),
+ * not a rewrite: a rewrite forwards the request verbatim, and the one header
+ * that must not be forwarded is the browser's cookie. See that file.
  */
-const supabaseInternal = process.env.SUPABASE_INTERNAL_URL || "http://127.0.0.1:54321";
-
 const nextConfig = {
   transpilePackages: ["@finance/shared"],
-  async rewrites() {
-    return [
-      { source: "/supabase/:path*", destination: `${supabaseInternal}/:path*` },
-    ];
-  },
 };
 
 export default nextConfig;

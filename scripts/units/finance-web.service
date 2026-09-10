@@ -8,6 +8,11 @@ Wants=finance-supabase.service
 WorkingDirectory=@ROOT@
 Environment=NODE_ENV=production
 Environment=PORT=3141
+# The browser sends every auth cookie it has accumulated for this origin,
+# and Node rejects the whole request with a bare 431 once they exceed 16KB.
+# Stale sessions from the era when the cookie was named after the URL push
+# it past that, so the ceiling is raised rather than left to chance.
+Environment=NODE_OPTIONS=--max-http-header-size=32768
 ExecStart=@NODE@ scripts/launch-web.js
 Restart=always
 RestartSec=3
