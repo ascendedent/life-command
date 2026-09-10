@@ -693,6 +693,25 @@ async function financeToolServer(db: unknown) {
         async (args) => json(await q.searchTransactions(asDb, args as never))
       ),
       tool(
+        "list_categories",
+        "Every category that may be assigned. Call this before categorising so the name is one that exists.",
+        {},
+        async () => json(await q.listCategories(asDb))
+      ),
+      tool(
+        "categorize_transactions",
+        "Recategorise specific transactions the owner has asked you to. Takes transaction ids from search_transactions — never a filter, so what changes is exactly what was looked at. Set apply_to_future only when the owner wants the merchant remembered; merchants that sell across unrelated categories are refused for that regardless. The previous categories are written to the audit log so a mistake can be undone.",
+        {
+          transaction_ids: z.array(z.string()).describe("ids from search_transactions; at most 200"),
+          category: z.string().describe("an exact name from list_categories"),
+          apply_to_future: z
+            .boolean()
+            .optional()
+            .describe("default false — also teach the merchant map so future charges land here"),
+        },
+        async (args) => json(await q.categorizeTransactions(asDb, args as never))
+      ),
+      tool(
         "spending_summary",
         "Totals over any date range, grouped by category, merchant, month or account. Use this rather than summing transactions by hand.",
         {
@@ -770,8 +789,11 @@ async function claudeCodeChat(
               mcpServers: { finance: await financeToolServer(tools.db) },
               allowedTools: [
                 "mcp__finance__list_accounts",
+                "mcp__finance__list_categories",
                 "mcp__finance__search_transactions",
                 "mcp__finance__spending_summary",
+                // The only tool here that writes. Everything else is read-only.
+                "mcp__finance__categorize_transactions",
               ],
               // Enough turns to look something up, then answer.
               maxTurns: 8,

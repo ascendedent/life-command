@@ -38,10 +38,9 @@ async function buildContext(supabase: Parameters<typeof loadFloorState>[0]) {
         .select("merchant, cadence, expected_amount, next_expected_date, status")
         .in("status", ["active", "price_changed", "missed"]),
       supabase.from("agent_floors").select("*"),
-      // Rates, so "which card should I pay first" has something to answer with.
-      supabase
-        .from("liabilities")
-        .select("account_id, type, apr, aprs, minimum_payment, next_due_date, last_statement_balance, last_statement_issue_date, last_payment_amount, last_payment_date, is_overdue"),
+      // Rates and statement balances are reachable through `list_accounts`;
+      // only the count is worth carrying, so the model knows they exist.
+      supabase.from("liabilities").select("account_id", { count: "exact", head: true }),
       fetchAll<Record<string, unknown>>(() =>
         supabase
           .from("transactions")
@@ -93,6 +92,7 @@ async function buildContext(supabase: Parameters<typeof loadFloorState>[0]) {
   );
 
   const range = await historyRange(supabase);
+  void liabilities;
 
   return {
     as_of: new Date().toISOString().slice(0, 10),
@@ -100,55 +100,14 @@ async function buildContext(supabase: Parameters<typeof loadFloorState>[0]) {
     // through the tools, and the model is told its span so it never guesses at
     // how far back the data goes.
     full_history_available_via_tools: range,
-    // A card can carry several rates at once and the promotional one, when
-    // present, is the one being paid. Rates Plaid did not report are stated as
-    // unknown rather than omitted — a missing rate reads as 0% otherwise.
-    interest_rates: (liabilities ?? []).map((l) => {
-      const entries = (Array.isArray(l.aprs) ? l.aprs : []) as {
-        apr_type?: string;
-        apr_percentage?: number | null;
-        balance_subject_to_apr?: number | null;
-        interest_charge_amount?: number | null;
-      }[];
-      const named = entries
-        .filter((e) => typeof e.apr_percentage === "number")
-        .map((e) => ({
-          kind: e.apr_type ?? "apr",
-          rate_pct: e.apr_percentage as number,
-          balance_subject_to_this_rate: e.balance_subject_to_apr ?? null,
-          interest_charged_last_statement: e.interest_charge_amount ?? null,
-        }));
-      const promo = named.find((e) => e.kind === "special");
-      const purchase = named.find((e) => e.kind === "purchase_apr");
-      return {
-        account: accountLabels.get(l.account_id as string) ?? "unknown account",
-        // The figure that must be paid to owe no interest. Distinct from the
-        // account's current balance, which includes charges since the statement
-        // closed and is not yet owed.
-        last_statement_balance: l.last_statement_balance,
-        last_statement_issue_date: l.last_statement_issue_date,
-        last_payment_amount: l.last_payment_amount,
-        last_payment_date: l.last_payment_date,
-        is_overdue: l.is_overdue,
-        minimum_payment: l.minimum_payment,
-        next_due_date: l.next_due_date,
-        rate_being_paid_pct: promo?.rate_pct ?? purchase?.rate_pct ?? (l.apr != null ? Number(l.apr) : null),
-        on_a_promotional_rate: !!promo,
-        rates: named.length ? named : "not reported by the institution",
-      };
-    }),
-    totals: {
-      liquid: sum((a) => a.type === "depository"),
-      credit_balances: sum((a) => a.type === "credit"),
-      loan_balances: sum((a) => a.type === "loan"),
-      investments: sum((a) => a.type === "investment"),
-    },
+    // Labels and balances only. Rates, statement balances, due dates, subtypes
+    // and ownership all come from `list_accounts` on demand — carrying them
+    // here cost 4,200 tokens on every single turn to answer a question that is
+    // asked on maybe one turn in ten.
     accounts: rows.map((a) => ({
       label: `${a.name} ‥${a.mask ?? "????"}`,
       type: a.type,
-      subtype: a.subtype,
       balance: a.current_balance,
-      member: (a.household_members as { name?: string } | null)?.name ?? null,
     })),
     cash_flow_by_month: [...byMonth.entries()].sort().map(([month, v]) => ({
       month,
@@ -162,7 +121,18 @@ async function buildContext(supabase: Parameters<typeof loadFloorState>[0]) {
       .map(([category, total]) => ({ category, total: round(total) })),
     floors: floorReadings,
     goals: goals ?? [],
-    recurring: recurring ?? [],
+    // The next few only. The rest is a query, not context.
+    recurring_next: (recurring ?? [])
+      .filter((x) => x.next_expected_date)
+      .sort((a, b) => String(a.next_expected_date).localeCompare(String(b.next_expected_date)))
+      .slice(0, 8)
+      .map((x) => ({
+        merchant: x.merchant,
+        amount: x.expected_amount,
+        due: x.next_expected_date,
+        status: x.status,
+      })),
+    recurring_total: (recurring ?? []).length,
   };
 }
 
@@ -172,7 +142,7 @@ const SYSTEM = `You are the conversational side of a self-hosted personal financ
 - Refer to an account by its exact \`label\`. Never pair an account name with a last-four yourself: several accounts share a name and differ only by mask.
 - Positive transaction amounts are outflows; negative are inflows.
 - \`last_statement_balance\` is what must be paid to avoid interest; the account's balance in \`accounts\` includes charges made since the statement closed and is not yet owed. Never treat the two as interchangeable, and never say interest is accruing on a card whose statement balance was paid.
-- \`interest_rates\` lists every rate a card carries, not one. \`rate_being_paid_pct\` is the one that applies now — a promotional rate overrides the purchase rate while it lasts. Where rates are "not reported by the institution", say the rate is unknown; never treat a missing rate as zero.
+- Interest rates, statement balances and due dates come from \`list_accounts\`, which lists every rate a card carries rather than one. \`rate_being_paid_pct\` is the one that applies now — a promotional rate overrides the purchase rate while it lasts. Where rates are "not reported by the institution", say the rate is unknown; never treat a missing rate as zero.
 - \`floors\` are limits the owner set on their own balance sheet, not suggestions. Never advise anything that would breach one, and never describe a floor's headroom as spare money without saying what it is holding back.
 - You are advisory. You cannot move money, place trades or change settings; if asked to, say what you would do and where in the app to do it.
 - The snapshot covers the last 90 days. The **full history** is available through your tools — \`list_accounts\` for every account and how to name one, \`search_transactions\` for individual transactions over any period, \`spending_summary\` for totals grouped by category, merchant, month or account. Use them rather than answering "I can only see 90 days", and rather than adding figures up by hand.

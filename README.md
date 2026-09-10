@@ -468,7 +468,16 @@ credit its rate, statement balance and due date), `search_transactions` (any
 date range, merchant, category, account or amount across the full history), and
 `spending_summary` (totals grouped by category, merchant, month or account).
 
-Handing it the history instead would be ~75k tokens per turn of mostly
+It can also **recategorise transactions** — the one thing it changes. It takes
+transaction ids from a search rather than a filter, so what changes is exactly
+what was looked at; it refuses an invented category name and any single
+instruction touching more than 200 rows; and the previous categories go to the
+audit log so a mistake can be undone rather than reconstructed. `apply_to_future`
+teaches the merchant map, and merchants that sell across unrelated categories
+are refused for that however explicitly asked — one Amazon refund filed by hand
+once taught the map "Amazon = Refunds" and restated 537 purchases as income.
+
+Handing it the history instead would be ~130k tokens per turn of mostly
 irrelevant context, and it still could not answer a question about one merchant
 in one month — whatever summary fits has already discarded the detail. To ask
 about one card, give its last four digits: several accounts share a name and
@@ -483,6 +492,12 @@ calmly is worse than an error when a model is reasoning from it.
 
 The tools run under the owner's own session, so RLS applies to them exactly as
 it does to the pages.
+
+**Measured, not assumed:** the per-turn snapshot is ~1,650 tokens. Carrying the
+full history instead would be ~132,000. The snapshot was 5,538 until rates,
+statement balances and the full recurring list moved into `list_accounts` — 59%
+of it was interest-rate detail answering a question asked on maybe one turn in
+ten. `scratch/measure-chat-tokens.mts` prices each section if it drifts again.
 
 **Model and effort are set per surface** from the gear on `/chat`. The model
 list is asked of the SDK rather than hardcoded, so it reflects whatever Claude

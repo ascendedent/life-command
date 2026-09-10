@@ -28,6 +28,7 @@ export interface TransactionSearch {
 }
 
 interface Row {
+  id: string;
   date: string;
   amount: number;
   merchant_clean: string | null;
@@ -64,7 +65,7 @@ export async function searchTransactions(db: SupabaseClient, p: TransactionSearc
 
   let q = db
     .from("transactions")
-    .select(`date, amount, merchant_clean, merchant, ${categoryJoin}, ${accountJoin}`)
+    .select(`id, date, amount, merchant_clean, merchant, ${categoryJoin}, ${accountJoin}`)
     // A split hides its parent and creates children; this counts each dollar
     // exactly once. Adding a parent filter would drop every split.
     .eq("hidden", false);
@@ -105,6 +106,9 @@ export async function searchTransactions(db: SupabaseClient, p: TransactionSearc
     // leaving the owner to wonder why a card payment is missing.
     transfers_included: !!p.include_transfers,
     transactions: rows.map((r) => ({
+      // Needed to act on a row later; categorising takes ids, never a filter,
+      // so what gets changed is exactly what was looked at.
+      id: r.id,
       date: r.date,
       merchant: r.merchant_clean ?? r.merchant,
       amount: Number(r.amount),
@@ -261,5 +265,163 @@ export async function listAccounts(db: SupabaseClient) {
           : {}),
       };
     }),
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+/** Categories that may be assigned, so a name is never invented. */
+export async function listCategories(db: SupabaseClient) {
+  const { data } = await db
+    .from("categories")
+    .select("id, name, category_groups (name, type)")
+    .eq("is_active", true)
+    .order("name");
+  return {
+    categories: (data ?? []).map((c) => ({
+      name: c.name as string,
+      group: (c.category_groups as unknown as { name?: string } | null)?.name ?? null,
+      type: (c.category_groups as unknown as { type?: string } | null)?.type ?? null,
+    })),
+  };
+}
+
+export interface CategorizeRequest {
+  transaction_ids: string[];
+  category: string;
+  /** Teach the merchant map so future charges from it land here too. */
+  apply_to_future?: boolean;
+}
+
+/** No single instruction may restate more of the book than this. */
+const MAX_RECATEGORIZE = 200;
+
+/**
+ * Recategorise specific transactions.
+ *
+ * Takes ids, never a filter. A filter would let one instruction reach rows
+ * nobody looked at, and the difference between "these six" and "everything
+ * matching this word" is the difference between a correction and an incident.
+ *
+ * `apply_to_future` teaches the merchant map, and that is the part with a
+ * history. One Amazon refund filed by hand once taught the map "Amazon =
+ * Refunds", after which 537 Amazon purchases were recorded as money arriving.
+ * The same guard the UI carries applies here: merchants that sell across
+ * unrelated categories are never generalised, however explicitly asked.
+ *
+ * Every change records what the category was before it, so a wrong call can be
+ * undone from the audit log rather than reconstructed from memory.
+ */
+export async function categorizeTransactions(db: SupabaseClient, p: CategorizeRequest) {
+  const { isMixedBasket, merchantKey } = await import("./categorize");
+
+  const ids = [...new Set(p.transaction_ids ?? [])].filter(Boolean);
+  if (!ids.length) return { changed: 0, error: "no transaction ids given" };
+  if (ids.length > MAX_RECATEGORIZE) {
+    return {
+      changed: 0,
+      error: `${ids.length} transactions asked for; ${MAX_RECATEGORIZE} is the most one instruction may change. Narrow it, or do it in batches the owner can see.`,
+    };
+  }
+
+  // The category must already exist. Inventing one is how a book grows three
+  // spellings of the same thing.
+  const { data: cats } = await db
+    .from("categories")
+    .select("id, name")
+    .ilike("name", p.category)
+    .eq("is_active", true)
+    .limit(2);
+  if (!cats?.length) {
+    return { changed: 0, error: `no active category named "${p.category}" — call list_categories first` };
+  }
+  if (cats.length > 1) {
+    return { changed: 0, error: `"${p.category}" matches more than one category; name it exactly` };
+  }
+  const categoryId = cats[0].id as string;
+  const categoryName = cats[0].name as string;
+
+  // Read before writing, so the audit entry can say what it replaced.
+  const { data: before } = await db
+    .from("transactions")
+    .select("id, category_id, merchant, merchant_clean, categories (name)")
+    .in("id", ids);
+  if (!before?.length) return { changed: 0, error: "none of those transactions exist" };
+
+  const { error } = await db
+    .from("transactions")
+    .update({
+      category_id: categoryId,
+      // Marked as the owner's decision, which stops the nightly enrichment
+      // pass from overwriting it.
+      category_source: "user",
+      needs_review: false,
+      reviewed_at: new Date().toISOString(),
+    })
+    .in("id", ids);
+  if (error) return { changed: 0, error: error.message };
+
+  // Teaching the map, if asked and if the merchant can bear it.
+  const taught: string[] = [];
+  const refused: string[] = [];
+  if (p.apply_to_future) {
+    const merchants = new Map<string, string | null>();
+    for (const t of before) {
+      const name = (t.merchant_clean ?? t.merchant) as string | null;
+      if (name) merchants.set(name, (t.merchant_clean as string) ?? null);
+    }
+    for (const [name, clean] of merchants) {
+      if (isMixedBasket(name)) {
+        refused.push(name);
+        continue;
+      }
+      const key = merchantKey(name);
+      if (!key) continue;
+      await db.from("merchant_map").upsert(
+        {
+          raw_pattern: key,
+          clean_name: clean,
+          default_category_id: categoryId,
+          source: "user",
+          confidence: 1,
+        },
+        { onConflict: "raw_pattern" }
+      );
+      taught.push(name);
+    }
+  }
+
+  await db.from("audit_log").insert({
+    actor: "user",
+    action: "transactions_recategorized_via_chat",
+    entity: "transactions",
+    detail: {
+      category: categoryName,
+      count: before.length,
+      taught_merchant_map: taught,
+      refused_mixed_basket: refused,
+      // Enough to reverse it by hand.
+      previous: before.map((t) => ({
+        id: t.id,
+        was: (t.categories as unknown as { name?: string } | null)?.name ?? null,
+        category_id: t.category_id,
+      })),
+    },
+  });
+
+  return {
+    changed: before.length,
+    category: categoryName,
+    ...(taught.length ? { future_charges_will_also_use_this: taught } : {}),
+    ...(refused.length
+      ? {
+          not_generalised: refused,
+          why: "these merchants sell across unrelated categories, so one correction must not restate the rest",
+        }
+      : {}),
+    reversible: "the previous categories are recorded in the audit log",
   };
 }
