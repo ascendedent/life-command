@@ -1,4 +1,5 @@
 import { createBrowserClient } from "@supabase/ssr";
+import { AUTH_COOKIE_NAME } from "./cookie-name";
 
 /**
  * The browser's Supabase URL, derived from where the page came from.
@@ -24,6 +25,9 @@ function browserSupabaseUrl(): string {
 export function createClient() {
   return createBrowserClient(
     browserSupabaseUrl(),
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    // Pinned, or the cookie name follows the URL and the server stops finding
+    // the session the moment the app is opened from another address.
+    { cookieOptions: { name: AUTH_COOKIE_NAME } }
   );
 }

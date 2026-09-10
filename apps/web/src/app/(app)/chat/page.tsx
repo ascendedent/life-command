@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileText, ImageIcon, Loader2, MessageSquare, Paperclip, Plus, Send, Settings2, X } from "lucide-react";
+import { FileText, ImageIcon, Loader2, MessageSquare, Paperclip, PanelLeft, Plus, Send, Settings2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -78,6 +78,11 @@ export default function ChatPage() {
   const [attachError, setAttachError] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChatSettings | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // The thread list is a permanent sidebar on a wide screen and a drawer on a
+  // narrow one. Without this it was `lg:` only, which meant a phone could hold
+  // a conversation but never reopen one — the history was there and simply
+  // unreachable.
+  const [showThreads, setShowThreads] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -141,6 +146,7 @@ export default function ChatPage() {
   }, [messages, busy]);
 
   async function openThread(id: string) {
+    setShowThreads(false);
     setConversationId(id);
     setBusy(true);
     const res = await fetch(`/api/chat?conversation_id=${id}`);
@@ -149,6 +155,7 @@ export default function ChatPage() {
   }
 
   function newThread() {
+    setShowThreads(false);
     setConversationId(null);
     setMessages([]);
     setMeta(null);
@@ -205,8 +212,25 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-6rem)] gap-4">
-      <aside className="hidden w-56 shrink-0 flex-col gap-2 lg:flex">
+    <div className="relative flex h-[calc(100vh-6rem)] gap-4">
+      {/* Backdrop only exists while the drawer is open on a narrow screen. */}
+      {showThreads && (
+        <button
+          type="button"
+          aria-label="Close conversations"
+          onClick={() => setShowThreads(false)}
+          className="absolute inset-0 z-10 bg-background/70 lg:hidden"
+        />
+      )}
+
+      <aside
+        className={cn(
+          "w-56 shrink-0 flex-col gap-2 lg:flex",
+          showThreads
+            ? "absolute inset-y-0 left-0 z-20 flex w-64 rounded-md border bg-background p-2 shadow-lg lg:static lg:w-56 lg:border-0 lg:p-0 lg:shadow-none"
+            : "hidden"
+        )}
+      >
         <Button variant="outline" size="sm" onClick={newThread}>
           <Plus className="h-4 w-4" /> New conversation
         </Button>
@@ -235,7 +259,18 @@ export default function ChatPage() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="mb-3 flex items-center justify-between gap-2">
-          <h1 className="text-xl font-semibold">Chat</h1>
+          <div className="flex min-w-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="lg:hidden"
+              onClick={() => setShowThreads((v) => !v)}
+              aria-label="Conversations"
+            >
+              <PanelLeft className="h-4 w-4" />
+            </Button>
+            <h1 className="truncate text-xl font-semibold">Chat</h1>
+          </div>
           <div className="flex items-center gap-2">
             {(meta || settings) && (
               <Badge variant="outline">

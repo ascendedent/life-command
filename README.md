@@ -502,8 +502,19 @@ subscription behind it.
 ## Reaching it from a phone
 
 By default nothing on the network can reach this app — it binds loopback only.
-Set `WEB_HOST=0.0.0.0` in the root `.env` and restart, and it serves on your
-machine's address (`http://<machine-ip>:3141`).
+`WEB_HOST` in the root `.env` changes that. Prefer binding the **VPN address
+specifically** (`WEB_HOST=100.x.y.z`) over `0.0.0.0`: it serves the tunnel and
+nothing else, so the app is never available over plain HTTP on the local
+network even for a moment.
+
+**The session cookie name is pinned** (`sb-life-command-auth-token`). Supabase
+otherwise derives it from the Supabase URL — `sb-<first host label>-auth-token`
+— which is invisible until the browser and the server disagree about that URL.
+Once the browser talks to `100.x.y.z:3141` and the server to `127.0.0.1:54321`,
+sign-in succeeds and issues a real token, then the next request carries a cookie
+the server never looks for and bounces back to the login page. Nothing errors;
+it reads exactly like a wrong password. Pinning it also makes a session portable
+across localhost, LAN and VPN addresses.
 
 **Supabase is not opened alongside it.** The browser reaches the database
 through this app at `/supabase`, proxied to a Supabase that stays bound to
