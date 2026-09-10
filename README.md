@@ -499,6 +499,45 @@ shell. Every tool is denied, the Claude Code system preset is replaced, and
 that has no business seeing them. What is left is a model call with a
 subscription behind it.
 
+## Reaching it from a phone
+
+By default nothing on the network can reach this app — it binds loopback only.
+Set `WEB_HOST=0.0.0.0` in the root `.env` and restart, and it serves on your
+machine's address (`http://<machine-ip>:3141`).
+
+**Supabase is not opened alongside it.** The browser reaches the database
+through this app at `/supabase`, proxied to a Supabase that stays bound to
+localhost. That is not just tidiness: `NEXT_PUBLIC_SUPABASE_URL` is compiled
+into the browser bundle as `127.0.0.1:54321`, and on a phone that address means
+*the phone*. The page would load and every login and query would fail against a
+database that isn't there. The browser client builds its URL from whatever
+origin served the page, so one build works from localhost, a LAN address, or a
+Tailscale name with nothing to reconfigure.
+
+The proxy path is excluded from the auth middleware. Left in, the session check
+treats every auth call as an unauthenticated page request and returns a login
+page to a `fetch` — which presents as a password that simply doesn't work.
+
+### Use a VPN rather than the bare LAN
+
+`WEB_HOST=0.0.0.0` serves **plain HTTP**. Session cookies and the six-digit code
+you type at sign-in cross the network unencrypted, readable by anyone who has
+your Wi-Fi password — which on a home network includes guests and every smart
+device on it. For a page showing bank balances and holding encrypted Plaid
+tokens, that is a poor trade for convenience.
+
+A mesh VPN fixes it without exposing anything publicly: install
+[Tailscale](https://tailscale.com/download) on this machine and on the phone,
+sign both into the same account, and reach the app at
+`http://<machine-name>:3141` over an encrypted WireGuard link. It works away
+from home as well, needs no port forwarding, and nothing is published to the
+internet. Keep `WEB_HOST=0.0.0.0` — Tailscale presents its own interface, so the
+app must listen on more than loopback either way.
+
+**Do not put this behind a public tunnel.** A URL anyone can reach is a URL
+anyone can attack, and the only thing between it and your accounts would be one
+password and one TOTP.
+
 ## Backups
 
 **The database is the only thing here that cannot be rebuilt.** Transactions
@@ -585,6 +624,7 @@ what the web app and workers need.
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Gmail receipts | set |
 | `AGENT_MODEL` / `RECEIPT_MODEL` / `ENRICH_MODEL` / `RECAP_MODEL` | per-function model overrides (default `claude-sonnet-5`) | optional |
 | `NTFY_TOPIC` | push notifications (recaps, receipts, watchlist) | optional |
+| `WEB_HOST` | bind address for the web app — `0.0.0.0` to reach it from other devices | defaults to loopback |
 | `ALPACA_KEY_ID` / `ALPACA_SECRET_KEY` | Phase 3a paper trading | needed to execute |
 | `ALPACA_PAPER_BASE` | points paper at a stub broker instead of Alpaca, for exercising order placement without an account | testing only |
 | `KALSHI_*` | Phase 3b | not yet needed |

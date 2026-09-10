@@ -54,6 +54,12 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    // `supabase` is excluded because it is not a page — it is the proxy the
+    // browser uses to reach the database (next.config.mjs). Left in, the
+    // session check treats every auth and query call as an unauthenticated
+    // page request and redirects it to /login, so signing in from another
+    // device fails with a login screen returned to a fetch. It looks exactly
+    // like a broken password.
+    "/((?!supabase|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
