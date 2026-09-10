@@ -514,6 +514,13 @@ querying rather than carrying history; embeddings do not shrink what is left.
 Its remaining misses are mostly data quality rather than retrieval — a moving
 company filed under Other Income cannot be found by describing what it does.
 
+The chat gets 30 steps per turn (`CHAT_MAX_TURNS`). Categorising is list,
+search, write, re-check, summarise, then answer, and an earlier budget of eight
+ran out *before reaching the answer* — discarding the whole turn while any
+categorising it had already done stayed committed and unreported. Running out
+now returns whatever was written plus a plain account of where it stopped,
+because a loop that can write must never fail silently mid-way.
+
 **Measured, not assumed:** the per-turn snapshot is ~1,650 tokens. Carrying the
 full history instead would be ~132,000. The snapshot was 5,538 until rates,
 statement balances and the full recurring list moved into `list_accounts` — 59%

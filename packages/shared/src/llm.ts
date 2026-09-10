@@ -778,6 +778,12 @@ async function claudeCodeChat(
 
   let reply = "";
   let tokens = 0;
+  // Which tools actually ran. Needed because this loop can write — hitting a
+  // step limit after categorising something is not a failed turn, it is a
+  // half-finished one, and the difference has to reach the owner.
+  const toolsUsed: string[] = [];
+  let ranOutOfSteps = false;
+  let turnsUsed = 0;
   try {
     for await (const message of query({
       prompt: prompt as never,
@@ -809,8 +815,14 @@ async function claudeCodeChat(
                 // The only tool here that writes. Everything else is read-only.
                 "mcp__finance__categorize_transactions",
               ],
-              // Enough turns to look something up, then answer.
-              maxTurns: 8,
+              // Categorising is list, search, write, re-check, summarise, then
+              // answer — eight steps ran out before reaching the answer and
+              // discarded the whole turn. Thirty is enough for real multi-step
+              // work while still bounding a loop that can write.
+              // Overridable so the budget can be tuned, and so the
+              // ran-out-of-steps path can be exercised deliberately rather
+              // than only discovered in front of the owner.
+              maxTurns: Number(process.env.CHAT_MAX_TURNS || 30),
             }
           : { allowedTools: [] }),
         disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task"],
@@ -818,20 +830,74 @@ async function claudeCodeChat(
         settingSources: [],
       },
     } as never)) {
-      const m = message as { type?: string; message?: { content?: unknown; usage?: Record<string, number> } };
+      const m = message as {
+        type?: string;
+        subtype?: string;
+        num_turns?: number;
+        message?: { content?: unknown; usage?: Record<string, number> };
+      };
+
+      // The loop ending because it ran out of steps arrives as a result
+      // message, not an exception. Left unhandled it surfaced as "Claude Code
+      // returned an error result: Reached maximum number of turns", the whole
+      // answer was discarded, and any categorising already committed went
+      // unreported.
+      if (m.type === "result") {
+        if (m.subtype === "error_max_turns") ranOutOfSteps = true;
+        turnsUsed = m.num_turns ?? turnsUsed;
+        continue;
+      }
+
       if (m.type !== "assistant") continue;
       const content = m.message?.content;
       if (Array.isArray(content)) {
-        for (const block of content as { type?: string; text?: string }[]) {
+        for (const block of content as { type?: string; text?: string; name?: string }[]) {
           if (block.type === "text" && block.text) reply += block.text;
+          if (block.type === "tool_use" && block.name) {
+            toolsUsed.push(String(block.name).replace(/^mcp__finance__/, ""));
+          }
         }
       }
       const u = m.message?.usage;
       if (u) tokens += (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
     }
   } catch (e: unknown) {
-    return { reply: null, tokens: 0, model, error: (e as Error).message };
+    // Running out of steps arrives as a thrown error, not as the result message
+    // the types suggest — which is why handling it on the result path did
+    // nothing and the raw "Claude Code returned an error result" text reached
+    // the owner with the whole answer discarded. Matched on the message
+    // because no typed error is exposed; anything unrecognised still falls
+    // through to the generic path below.
+    const msg = (e as Error).message ?? "";
+    if (/maximum number of turns/i.test(msg)) {
+      ranOutOfSteps = true;
+      const m = msg.match(/\((\d+)\)/);
+      if (m) turnsUsed = Number(m[1]);
+    } else {
+      return { reply: reply.trim() || null, tokens, model, error: msg };
+    }
   }
+  if (ranOutOfSteps) {
+    // Report what happened rather than discarding it. The written work is
+    // already committed and the owner needs to know which of it landed.
+    const wrote = toolsUsed.filter((t) => t === "categorize_transactions").length;
+    const looked = [...new Set(toolsUsed.filter((t) => t !== "categorize_transactions"))];
+    const note =
+      `I ran out of steps after ${turnsUsed}` +
+      (wrote
+        ? `, having already recategorised in ${wrote} batch${wrote === 1 ? "" : "es"} — those changes are saved and are in the audit log.`
+        : looked.length
+          ? ` while still looking things up (${looked.join(", ")}), and changed nothing.`
+          : ` and changed nothing.`) +
+      " Ask me to continue, or narrow it to one thing at a time.";
+    return {
+      reply: reply.trim() || null,
+      tokens,
+      model,
+      error: note,
+    };
+  }
+
   return { reply: reply.trim() || null, tokens, model };
 }
 

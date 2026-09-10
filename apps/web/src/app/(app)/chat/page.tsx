@@ -387,7 +387,9 @@ export default function ChatPage() {
                   "max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm",
                   m.role === "user"
                     ? "bg-primary text-primary-foreground"
-                    : m.error
+                    : // An answer that also carries a note is not a failure —
+                      // only style it as one when there is nothing else.
+                      m.error && !m.content
                       ? "border border-destructive/40 bg-destructive/5"
                       : "border bg-muted/40"
                 )}
@@ -411,7 +413,12 @@ export default function ChatPage() {
                 )}
                 {m.content}
                 {m.error && (
-                  <p className={cn("text-xs text-destructive", m.content && "mt-2")}>
+                  <p
+                    className={cn(
+                      "text-xs",
+                      m.content ? "mt-2 border-t pt-2 text-muted-foreground" : "text-destructive"
+                    )}
+                  >
                     {m.error}
                   </p>
                 )}
