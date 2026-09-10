@@ -663,6 +663,7 @@ async function financeToolServer(db: unknown) {
   const { createSdkMcpServer, tool } = await import("@anthropic-ai/claude-agent-sdk");
   const { z } = await import("zod");
   const q = await import("./finance-query");
+  const plan = await import("./rewards-plan");
   const asDb = db as Parameters<typeof q.searchTransactions>[0];
   const json = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v) }] });
 
@@ -674,6 +675,18 @@ async function financeToolServer(db: unknown) {
         "Every account the owner holds, with its balance, who it belongs to, and for credit accounts the interest rate, statement balance and due date. Call this first to learn which accounts exist and what to pass as `account` to search_transactions.",
         {},
         async () => json(await q.listAccounts(asDb))
+      ),
+      tool(
+        "rewards_plan",
+        "Which card each category of spending belongs on, priced against what the owner actually spends. Returns the best card per category, the annual cash back it earns, and whether that card can be used right now — a card carrying a balance has no grace period, so a purchase made to earn a reward accrues interest from the day it posts and usually loses money. Recommend a card only when `ready` is true, and say so plainly when the best-earning card is blocked.",
+        {},
+        async () => json(await plan.rewardsPlan(asDb))
+      ),
+      tool(
+        "card_terms",
+        "Promotional 0% windows with their end dates and days remaining, and the cash-back rate each card pays per category. Use it to answer which card a purchase belongs on, and when a promotional balance stops being free and starts costing interest. These are entered by hand from statements — no API returns them — so a card with nothing recorded simply has nothing recorded, which is not the same as having no promo or no rewards.",
+        {},
+        async () => json(await q.cardTerms(asDb))
       ),
       tool(
         "find_merchants",

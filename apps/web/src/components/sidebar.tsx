@@ -3,18 +3,19 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  LayoutDashboard,
-  Inbox,
-  Target,
-  Wallet,
-  RefreshCw,
-  TrendingUp,
-  List,
   BarChart3,
   Bot,
-  Sparkles,
-  ScrollText,
+  CreditCard,
+  Inbox,
+  LayoutDashboard,
+  List,
   MessageSquare,
+  RefreshCw,
+  ScrollText,
+  Sparkles,
+  Target,
+  TrendingUp,
+  Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +26,7 @@ const NAV = [
   { href: "/goals", label: "Goals", icon: Target },
   { href: "/budget", label: "Budget", icon: Wallet },
   { href: "/recurring", label: "Recurring", icon: RefreshCw },
+  { href: "/cards", label: "Cards", icon: CreditCard },
   { href: "/invest", label: "Investments", icon: TrendingUp },
   { href: "/transactions", label: "Transactions", icon: List },
   { href: "/reports", label: "Reports", icon: BarChart3 },

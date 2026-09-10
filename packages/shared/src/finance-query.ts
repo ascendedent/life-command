@@ -271,6 +271,86 @@ export async function listAccounts(db: SupabaseClient) {
 }
 
 
+/**
+ * Promo windows and reward rates — the hand-entered facts no API returns.
+ *
+ * Both answer questions the balance alone cannot: whether a balance is free or
+ * about to become expensive, and which card a given purchase belongs on. The
+ * days-remaining figure is computed here rather than left as a date, because a
+ * date invites the model to do calendar arithmetic and get it wrong.
+ */
+export async function cardTerms(db: SupabaseClient) {
+  const [{ data: accounts }, { data: promos }, { data: rewards }] = await Promise.all([
+    db.from("accounts").select("id, name, mask, current_balance, institutions (name)").eq("type", "credit"),
+    db.from("card_promos").select("*").order("ends_on"),
+    db.from("card_rewards").select("*, categories (name)"),
+  ]);
+
+  const label = new Map(
+    (accounts ?? []).map((a) => {
+      const bank = (a.institutions as unknown as { name?: string } | null)?.name;
+      return [a.id as string, `${bank ? `${bank} — ` : ""}${a.name} ‥${a.mask ?? "????"}`];
+    })
+  );
+  const balance = new Map((accounts ?? []).map((a) => [a.id as string, Number(a.current_balance ?? 0)]));
+  const today = new Date();
+  const days = (d: string) =>
+    Math.round((new Date(d + "T00:00:00").getTime() - today.getTime()) / 86_400_000);
+
+  const carrying = new Set(
+    (accounts ?? []).filter((a) => Number(a.current_balance ?? 0) > 1).map((a) => a.id as string)
+  );
+
+  return {
+    promos: (promos ?? []).map((p) => {
+      const bal = Number(p.balance_at_start ?? balance.get(p.account_id as string) ?? 0);
+      const post = p.post_promo_apr != null ? Number(p.post_promo_apr) : null;
+      return {
+        account: label.get(p.account_id as string) ?? "?",
+        promo_rate_pct: Number(p.apr),
+        applies_to: p.kind,
+        ends_on: p.ends_on,
+        days_remaining: days(p.ends_on as string),
+        balance_under_promo: bal,
+        reprices_to_pct: post,
+        monthly_interest_after_expiry: post != null ? Number(((bal * post) / 100 / 12).toFixed(2)) : null,
+        deferred_interest: p.deferred_interest === true,
+        deferred_interest_note: p.deferred_interest
+          ? "if not cleared by ends_on, interest is charged back to the start, not just forward"
+          : undefined,
+        note: p.note,
+      };
+    }),
+    rewards: (rewards ?? []).map((r) => ({
+      account: label.get(r.account_id as string) ?? "?",
+      category: (r.categories as unknown as { name?: string } | null)?.name ?? "everything else (base rate)",
+      rate_pct: Number(r.rate),
+      cap_amount: r.cap_amount,
+      cap_period: r.cap_period,
+      rotates_until: r.ends_on,
+      note: r.note,
+    })),
+    /**
+     * A balance on screen is not the same as owing interest.
+     *
+     * Paying each statement in full keeps the grace period, so new purchases
+     * owe nothing until the next due date however large the current balance
+     * looks — most of it is this cycle's spending, which is not yet due. Only a
+     * statement that went unpaid ends that. Reported as a balance rather than a
+     * verdict, so nothing downstream mistakes the two.
+     */
+    cards_with_a_current_balance: (accounts ?? [])
+      .filter((a) => carrying.has(a.id as string))
+      .map((a) => ({
+        account: label.get(a.id as string),
+        current_balance: Number(a.current_balance ?? 0),
+        note: "a balance alone does not mean interest is being paid — check whether the statement is paid in full",
+      })),
+    guidance:
+      "Paying a statement balance in full each month means no interest, whatever the current balance shows. Do not tell the owner a card costs them interest unless an interest charge appears on it. Recommend the card with the best rate for the category; only warn about the grace period for a card that has actually been charged interest, because there the purchase accrues from the day it posts.",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Writing
 // ---------------------------------------------------------------------------
