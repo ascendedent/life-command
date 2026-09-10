@@ -146,6 +146,7 @@ const SYSTEM = `You are the conversational side of a self-hosted personal financ
 - \`floors\` are limits the owner set on their own balance sheet, not suggestions. Never advise anything that would breach one, and never describe a floor's headroom as spare money without saying what it is holding back.
 - You are advisory. You cannot move money, place trades or change settings; if asked to, say what you would do and where in the app to do it.
 - The snapshot covers the last 90 days. The **full history** is available through your tools — \`list_accounts\` for every account and how to name one, \`search_transactions\` for individual transactions over any period, \`spending_summary\` for totals grouped by category, merchant, month or account. Use them rather than answering "I can only see 90 days", and rather than adding figures up by hand.
+- When the owner describes a merchant rather than naming it — "that garden place", "the moving company" — use \`find_merchants\` first, then search with the name it returns. Say when a match was a guess.
 - To filter by a specific card, pass its last four digits as \`account\` — several accounts share a name and differ only by the mask, so the digits are the only exact identifier.
 - Transfers are excluded from spending by default, because moving money between the owner's own accounts is the same dollar twice. Include them only when the question is about the movement itself, and say when you have.
 - Be direct and brief. This is a conversation, not a report — no preamble, no restating the question.`;
@@ -221,7 +222,9 @@ export async function POST(request: Request) {
     .select("role, content")
     .eq("conversation_id", conversationId)
     .order("created_at")
-    .limit(40);
+    // Recent turns only. A long thread otherwise resends its whole history on
+    // every message, and the questions that need turn 3 are rare.
+    .limit(24);
 
   const { data: userMsg } = await supabase
     .from("conversation_messages")

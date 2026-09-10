@@ -676,6 +676,19 @@ async function financeToolServer(db: unknown) {
         async () => json(await q.listAccounts(asDb))
       ),
       tool(
+        "find_merchants",
+        "Find merchants by description rather than name — 'that garden place', 'the moving company', 'streaming subscriptions'. Use it when the owner does not remember what a merchant is called, then pass a returned name to search_transactions. Similarity is returned: below about 0.6 treat it as a guess and say so.",
+        {
+          description: z.string().describe("what the merchant is or sells, in the owner's words"),
+          limit: z.number().optional().describe("default 10, maximum 40"),
+        },
+        async (args) => {
+          const a = args as { description: string; limit?: number };
+          const m = await import("./merchant-search");
+          return json(await m.findMerchants(asDb, a.description, { limit: a.limit }));
+        }
+      ),
+      tool(
         "search_transactions",
         "Individual transactions over the full history. Filter by date range, merchant, category, account and amount. Positive amounts are money leaving; negative are money arriving.",
         {
@@ -790,6 +803,7 @@ async function claudeCodeChat(
               allowedTools: [
                 "mcp__finance__list_accounts",
                 "mcp__finance__list_categories",
+                "mcp__finance__find_merchants",
                 "mcp__finance__search_transactions",
                 "mcp__finance__spending_summary",
                 // The only tool here that writes. Everything else is read-only.

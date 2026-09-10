@@ -43,7 +43,9 @@ const label = (a: Row["accounts"]) => `${a?.name ?? "unknown"} ‥${a?.mask ?? "
 const MAX_ROWS = 300;
 
 export async function searchTransactions(db: SupabaseClient, p: TransactionSearch) {
-  const limit = Math.min(p.limit ?? 50, MAX_ROWS);
+  // 25 by default rather than 50: a 50-row result is ~2,000 tokens, and most
+  // questions are answered by the first handful. The model can ask for more.
+  const limit = Math.min(p.limit ?? 25, MAX_ROWS);
 
   // Every filter runs in SQL, and that is the whole point.
   //

@@ -493,6 +493,27 @@ calmly is worse than an error when a model is reasoning from it.
 The tools run under the owner's own session, so RLS applies to them exactly as
 it does to the pages.
 
+**Semantic merchant recall** (`find_merchants`) answers what a substring cannot:
+"that garden place", "the moving company", "streaming subscriptions". Embeddings
+run locally through Ollama (`nomic-embed-text`, 768 dimensions) into pgvector,
+so a list of everywhere the owner shops never leaves the machine — which for
+this data is not a nice-to-have. `scratch/build-merchant-index.mts` builds it;
+only merchants whose text changed are re-embedded, so a rebuild is ~2s once
+steady rather than ~19s cold.
+
+Merchants are indexed, not transactions: 785 against 3,099, and every
+transaction from one merchant embeds to the same point anyway. And the source
+text is the name **plus its dominant category**, not the name alone — a bare
+"1-800-Pack-Rat" contains no word about moving, so searching "moving and storage
+company" ranked a wine shop with "Warehouse" in its name above it. With the
+category attached, "electric utility" went from 0.70/0.58/0.55 to 0.79/0.79/0.78
+across three real utilities, and "coffee shop" stopped returning a smoke shop.
+
+This is a **recall** feature, not a cost saving. The token problem was solved by
+querying rather than carrying history; embeddings do not shrink what is left.
+Its remaining misses are mostly data quality rather than retrieval — a moving
+company filed under Other Income cannot be found by describing what it does.
+
 **Measured, not assumed:** the per-turn snapshot is ~1,650 tokens. Carrying the
 full history instead would be ~132,000. The snapshot was 5,538 until rates,
 statement balances and the full recurring list moved into `list_accounts` — 59%
